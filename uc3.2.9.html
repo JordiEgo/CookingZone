@@ -965,6 +965,7 @@
   <div class="row" style="margin-bottom:8px">
     <button id="scanConnectBtn" class="btn btn-primary">Connect your Cooking Appliance</button>
     <button id="disconnectBtn" class="btn btn-danger">Disconnect</button>
+    <button id="forceDiscoverBtn" class="btn btn-outline" disabled title="Re-discover all characteristics without disconnecting">🔄 Re-discover</button>
   </div>
   <div class="row" style="margin-bottom:8px">
     <span id="connDot" class="dot"></span>
@@ -2154,6 +2155,8 @@ function refreshConnectButtonState() {
     btn.classList.add('btn-outline');
     btn.classList.remove('btn-primary');
     btn.title = 'Already connected';
+    const fdBtn = $('forceDiscoverBtn');
+    if (fdBtn) fdBtn.disabled = !!connectFlowBusy;
     return;
   }
 
@@ -2161,6 +2164,8 @@ function refreshConnectButtonState() {
   btn.classList.add('btn-primary');
   btn.classList.remove('btn-outline');
   btn.title = '';
+  const fdBtn = $('forceDiscoverBtn');
+  if (fdBtn) fdBtn.disabled = true;
 }
 
 function setNotifStatus(text, isLive = false) {
@@ -3159,6 +3164,44 @@ async function connectCookingZoneFlow() {
     connectFlowBusy = false;
     refreshConnectButtonState();
     $('scanConnectBtn').textContent = 'Connect your Cooking Appliance';
+  }
+}
+
+async function forceRediscoverCharacteristics() {
+  if (!applianceGatt?.connected) {
+    log('Force re-discover: appliance not connected', true);
+    return;
+  }
+  const btn = $('forceDiscoverBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Discovering…'; }
+  connectFlowBusy = true;
+  try {
+    log('Force re-discover: re-reading services and characteristics…');
+    const found = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
+    czServices = found.length ? found : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
+    syncZoneUiState();
+    renderZones();
+    await bindAllSensorCharacteristics();
+    await configureSensorTriggersForAllZones();
+    await bindAllActualControlCharacteristics();
+    await bindAllCzControlCharacteristics();
+    await bindAllCzCookingStepStatusCharacteristics();
+    await primeZoneDescriptions();
+    await primeZoneCapabilities();
+    await enableActualCtrlIndications();
+    await enableCzControlIndications();
+    await enableCookingStepStatusNotifications();
+    await primeAllActualConditionsOnce();
+    await primeAllCzControlStatesOnce();
+    await enableSensorNotifications();
+    await primeAllInternalTemperatures();
+    log('Force re-discover: done');
+  } catch (e) {
+    log(`Force re-discover error: ${e.message}`, true);
+  } finally {
+    connectFlowBusy = false;
+    if (btn) { btn.textContent = '🔄 Re-discover'; }
+    refreshConnectButtonState();
   }
 }
 
@@ -4462,6 +4505,8 @@ $('swapZonesBtn').addEventListener('click', swapZoneMapping);
 $('disconnectBtn').addEventListener('click', () => {
   if (applianceDevice?.gatt?.connected) applianceDevice.gatt.disconnect();
 });
+
+$('forceDiscoverBtn').addEventListener('click', forceRediscoverCharacteristics);
 
 $('pickCookwareBtn').addEventListener('click', pickCookwareAndReadId);
 $('associateBtn').addEventListener('click', () => writeCzControl(0x00));
