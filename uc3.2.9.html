@@ -1067,6 +1067,7 @@
   <div id="advancedPanel">
     <div class="row" style="margin-bottom:8px; gap:8px;">
       <button id="advancedQueryBtn" class="btn btn-outline" type="button">🔎 Query Active CZ</button>
+      <button id="readCzDescBtn" class="btn btn-outline" type="button">📝 Read CZ Descriptions</button>
       <button id="openFtsModalBtn" class="btn" type="button" style="background:#1d4ed8; border-color:#1e40af; color:#fff;">🧩 FTS Console</button>
     </div>
     <div id="advancedStatus" class="status-chip" style="margin:0">—</div>
@@ -4516,6 +4517,21 @@ $('abortBtn').addEventListener('click', () => writeCzControl(0x02));
 // Recipe panel is always visible (no toggle button)
 
 $('advancedQueryBtn').addEventListener('click', runAdvancedQuery);
+
+$('readCzDescBtn').addEventListener('click', async () => {
+  if (!applianceGatt?.connected) {
+    log('Read CZ Descriptions: connect appliance first', true);
+    return;
+  }
+  await primeZoneDescriptions();
+  syncZoneUiState();
+  zoneUiState.forEach((z, i) => {
+    if (z.descriptionReady) {
+      log(`CZ${i + 1} description text: "${z.descriptionText || '(empty)'}"`);
+      log(`CZ${i + 1} description hex:  ${z.descriptionHex || '(empty)'}`);
+    }
+  });
+});
 
 function openFtsModal() {
   $('ftsOverlay').style.display = 'block';
