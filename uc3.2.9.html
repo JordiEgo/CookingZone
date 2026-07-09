@@ -2645,14 +2645,6 @@ async function primeZoneDescriptions() {
     try {
       const serviceIdx = getServiceIndexForUi(i);
       const desc = await czServices[serviceIdx].getCharacteristic(UUID_CZ_DESCRIPTION);
-      // Log characteristic properties to diagnose iOS/Bluefy issues
-      const props = desc.properties;
-      const propList = Object.entries(props).filter(([,v]) => v).map(([k]) => k).join(', ');
-      log(`CZ${i + 1}: 8FEE properties: [${propList || 'none'}]`);
-      if (!props.read) {
-        log(`CZ${i + 1}: 8FEE does not support read — skipping`, true);
-        continue;
-      }
       const dv = await desc.readValue();
       if (zoneUiState[i]) {
         const hex = dataViewToHex(dv);
@@ -2667,7 +2659,7 @@ async function primeZoneDescriptions() {
         zoneUiState[i].descriptionHex = '';
         zoneUiState[i].descriptionText = '';
       }
-      log(`CZ${i + 1}: description read failed — name=${e.name} msg=${e.message}`, true);
+      log(`CZ${i + 1}: description read failed (${e.message})`, true);
     }
   }
   renderCooktopZones();
