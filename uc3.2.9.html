@@ -1321,7 +1321,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-T';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-V';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -2442,16 +2442,17 @@ async function pollAllZonesOnce() {
   let changed = false;
   try {
     syncZoneUiState();
-    // 2C2B (condiciones actuales) se lee en CADA ciclo → refleja rápido los cambios
-    // hechos en el display físico. 8FEC/2C28 cambian rara vez, así que se leen solo
-    // 1 de cada 4 ciclos para no saturar la conexión (sobre todo en iOS/Bluefy).
+    // Poll MÍNIMO (como el cliente de referencia): SOLO se lee 2C2B (condiciones
+    // actuales: power+temp+humidity) una vez por ciclo. 8FEC (control de zona) y
+    // 2C28 (estado de paso de receta) NO se sondean: llegan por indicación/notificación
+    // o se leen puntualmente al asociar cazuela / arrancar receta. Así el enlace queda
+    // limpio, sin la ráfaga de lecturas que teníamos antes.
     allZonesPollCycle = (allZonesPollCycle + 1) % 1000000;
-    const pollSlowChars = (allZonesPollCycle % 4 === 0);
+    const logThisCycle = (allZonesPollCycle % 5 === 0); // log de diagnóstico ~cada 5 lecturas
     const zoneCount = zoneUiState.length;
     for (let z = 0; z < zoneCount; z++) {
-      // Sensor internal temperature (8FEA) — SOLO si las notificaciones NO están
-      // activas. Si hay notificación, el sensor ya llega solo y re-leerlo aquí
-      // sólo genera tráfico redundante que ralentiza la conexión.
+      // Sensor interno (8FEA) — SOLO si las notificaciones NO están activas. En iOS/Bluefy
+      // las notificaciones de sensor sí funcionan, así que normalmente esto NO se lee.
       if (!sensorNotifEnabled) {
         const sensorGroup = sensorCharsByZone[z] || [];
         for (let s = 0; s < sensorGroup.length; s++) {
@@ -2476,7 +2477,7 @@ async function pollAllZonesOnce() {
         }
       }
 
-      // Actual cooking conditions (2C2B)
+      // Actual cooking conditions (2C2B) — ÚNICA lectura periódica.
       const actualCh = actualCtrlCharsByZone[z];
       if (actualCh) {
         try {
@@ -2484,33 +2485,16 @@ async function pollAllZonesOnce() {
           const parsed = parseActualCookingConditions(dv, `CZ${z + 1}`);
           updateZoneFromActualConditions(z, parsed);
           changed = true;
-        } catch (_) { /* keep going */ }
-      }
-
-      // Cooking Zone Control (8FEC)
-      const ctrlCh = czControlCharsByZone[z];
-      if (ctrlCh && pollSlowChars) {
-        try {
-          const dv = await ctrlCh.readValue();
-          const parsed = parseCzControlPayload(dv);
-          updateZoneFromCzControl(z, parsed, 'read');
-          changed = true;
-        } catch (_) { /* keep going */ }
-      }
-
-      // Cooking Step Status (2C28)
-      const cssCh = cookingStepStatusCharsByZone[z];
-      if (cssCh && pollSlowChars) {
-        try {
-          const dv = await cssCh.readValue();
-          if (dv && dv.byteLength >= 5) {
-            const remainingTime = dv.getUint16(3, true);
-            if (remainingTime === 0 && zoneUiState[z]?.recipeRunning) {
-              setZoneRecipeRunning(z, false);
-              changed = true;
-            }
+          if (logThisCycle) {
+            const pw = Number.isFinite(parsed.powerLevel_pct) ? `${parsed.powerLevel_pct.toFixed(1)}%` : '—';
+            const tp = Number.isFinite(parsed.temperature_C) ? `${parsed.temperature_C.toFixed(1)}°C` : '—';
+            log(`CZ${z + 1} 2C2B read -> flags=0x${(parsed.flags || 0).toString(16).padStart(4, '0')} power=${pw} temp=${tp} raw=${dataViewToHex(dv)}`);
           }
-        } catch (_) { /* keep going */ }
+        } catch (e) {
+          log(`CZ${z + 1} 2C2B read FAILED (${e.message})`, true);
+        }
+      } else if (logThisCycle) {
+        log(`CZ${z + 1} 2C2B not bound (actualCtrlCharsByZone empty) — no actual conditions`, true);
       }
     }
   } finally {
@@ -3342,6 +3326,9 @@ async function queueDesiredPower(zoneIdx, value) {
       const v = desiredPowerPending[zoneIdx];
       desiredPowerPending[zoneIdx] = undefined;
       await writeDesiredPower(zoneIdx, v, true);
+      // Throttle: al arrastrar rápido, no enviamos más de ~1 escritura cada 200 ms.
+      // Solo esperamos si aún hay un valor nuevo pendiente (arrastre en curso).
+      if (desiredPowerPending[zoneIdx] !== undefined) await delay(200);
     }
   } finally {
     desiredPowerBusy[zoneIdx] = false;
@@ -3357,6 +3344,8 @@ async function queueDesiredTemperature(zoneIdx, value) {
       const v = desiredTempPending[zoneIdx];
       desiredTempPending[zoneIdx] = undefined;
       await writeDesiredTemperature(zoneIdx, v, true);
+      // Throttle: al arrastrar rápido, no enviamos más de ~1 escritura cada 200 ms.
+      if (desiredTempPending[zoneIdx] !== undefined) await delay(200);
     }
   } finally {
     desiredTempBusy[zoneIdx] = false;
