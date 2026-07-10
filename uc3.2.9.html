@@ -3137,23 +3137,29 @@ async function connectCookingZoneFlow() {
     log(`Initial zone mapping: ${uiToServiceMap.map((svc, ui) => `UI CZ${ui + 1}->SVC${svc + 1}`).join(', ')}`);
     renderZones();
 
-    try {
-      await bindAllSensorCharacteristics();
-      await configureSensorTriggersForAllZones();
-      await bindAllActualControlCharacteristics();
-      await bindAllCzControlCharacteristics();
-      await bindAllCzCookingStepStatusCharacteristics();
-      await primeZoneDescriptions();
-      await primeZoneCapabilities();
-      await enableActualCtrlIndications();
-      await enableCzControlIndications();
-      await enableCookingStepStatusNotifications();
-      await primeAllActualConditionsOnce();
-      await primeAllCzControlStatesOnce();
-      await enableSensorNotifications();
-      await primeAllInternalTemperatures();
-    } catch (notifErr) {
-      log(`Connected, but notification setup failed: ${notifErr.message}`, true);
+    // Each step is isolated — one failure does not block the rest (important for iOS/Bluefy)
+    const steps = [
+      ['bindAllSensorCharacteristics',          bindAllSensorCharacteristics],
+      ['configureSensorTriggers',               configureSensorTriggersForAllZones],
+      ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
+      ['bindAllCzControlChars',                 bindAllCzControlCharacteristics],
+      ['bindAllCzCookingStepStatusChars',       bindAllCzCookingStepStatusCharacteristics],
+      ['primeZoneDescriptions',                 primeZoneDescriptions],
+      ['primeZoneCapabilities',                 primeZoneCapabilities],
+      ['enableActualCtrlIndications',           enableActualCtrlIndications],
+      ['enableCzControlIndications',            enableCzControlIndications],
+      ['enableCookingStepStatusNotifications',  enableCookingStepStatusNotifications],
+      ['primeAllActualConditionsOnce',          primeAllActualConditionsOnce],
+      ['primeAllCzControlStatesOnce',           primeAllCzControlStatesOnce],
+      ['enableSensorNotifications',             enableSensorNotifications],
+      ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
+    ];
+    for (const [name, fn] of steps) {
+      try {
+        await fn();
+      } catch (stepErr) {
+        log(`Setup step [${name}] failed: ${stepErr.message}`, true);
+      }
     }
   } catch (e) {
     if (e.name === 'NotFoundError') {
@@ -3182,20 +3188,25 @@ async function forceRediscoverCharacteristics() {
     czServices = found.length ? found : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
     syncZoneUiState();
     renderZones();
-    await bindAllSensorCharacteristics();
-    await configureSensorTriggersForAllZones();
-    await bindAllActualControlCharacteristics();
-    await bindAllCzControlCharacteristics();
-    await bindAllCzCookingStepStatusCharacteristics();
-    await primeZoneDescriptions();
-    await primeZoneCapabilities();
-    await enableActualCtrlIndications();
-    await enableCzControlIndications();
-    await enableCookingStepStatusNotifications();
-    await primeAllActualConditionsOnce();
-    await primeAllCzControlStatesOnce();
-    await enableSensorNotifications();
-    await primeAllInternalTemperatures();
+    const steps = [
+      ['bindAllSensorCharacteristics',          bindAllSensorCharacteristics],
+      ['configureSensorTriggers',               configureSensorTriggersForAllZones],
+      ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
+      ['bindAllCzControlChars',                 bindAllCzControlCharacteristics],
+      ['bindAllCzCookingStepStatusChars',       bindAllCzCookingStepStatusCharacteristics],
+      ['primeZoneDescriptions',                 primeZoneDescriptions],
+      ['primeZoneCapabilities',                 primeZoneCapabilities],
+      ['enableActualCtrlIndications',           enableActualCtrlIndications],
+      ['enableCzControlIndications',            enableCzControlIndications],
+      ['enableCookingStepStatusNotifications',  enableCookingStepStatusNotifications],
+      ['primeAllActualConditionsOnce',          primeAllActualConditionsOnce],
+      ['primeAllCzControlStatesOnce',           primeAllCzControlStatesOnce],
+      ['enableSensorNotifications',             enableSensorNotifications],
+      ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
+    ];
+    for (const [name, fn] of steps) {
+      try { await fn(); } catch (e) { log(`Re-discover step [${name}] failed: ${e.message}`, true); }
+    }
     log('Force re-discover: done');
   } catch (e) {
     log(`Force re-discover error: ${e.message}`, true);
