@@ -1321,7 +1321,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-R';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-S';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -1970,7 +1970,11 @@ function updateZoneFromActualConditions(zoneIdx, parsed) {
   if (!z) return;
 
   z.actualFlags = Number.isFinite(parsed.flags) ? parsed.flags : null;
-  z.power = Number.isFinite(parsed.powerLevel_pct) ? `${parsed.powerLevel_pct.toFixed(1)}%` : '—';
+  // No sobrescribir el valor de potencia mientras el usuario arrastra el slider del
+  // cliente (holdoff): así el poll de 2C2B no "pelea" con lo que estás ajustando.
+  if (Date.now() >= (z.pendingPowerUntilMs || 0)) {
+    z.power = Number.isFinite(parsed.powerLevel_pct) ? `${parsed.powerLevel_pct.toFixed(1)}%` : '—';
+  }
   // Keep previous setpoint temperature if this 2C2B frame does not include Temperature.
   if ((parsed.flags & CC_FLAGS.TEMPERATURE_PRESENT) !== 0) {
     const nowMs = Date.now();
@@ -2203,7 +2207,11 @@ function renderCooktopZones() {
       e.target.style.setProperty('--fill', `${value}%`);
       const valueEl = $(`pwrVal-${zoneIdx}`);
       if (valueEl) valueEl.textContent = `${value.toFixed(1)}%`;
-      if (zoneUiState[zoneIdx]) zoneUiState[zoneIdx].power = `${value.toFixed(1)}%`;
+      if (zoneUiState[zoneIdx]) {
+        zoneUiState[zoneIdx].power = `${value.toFixed(1)}%`;
+        // Holdoff: evita que el poll de 2C2B pise el valor mientras arrastras.
+        zoneUiState[zoneIdx].pendingPowerUntilMs = Date.now() + 1500;
+      }
       // Coalescer: guarda el último valor y envía uno cada vez (sin inundar el enlace).
       queueDesiredPower(zoneIdx, value);
     });
@@ -3620,9 +3628,9 @@ async function connectCookingZoneFlow() {
     }
 
     // Poll de respaldo (iOS/Bluefy no puede activar indicaciones de 2C2B/8FEC).
-    // 2C2B se lee cada ciclo (cambios del display físico se ven rápido); 8FEC/2C28
-    // solo 1 de cada 4 ciclos. Intervalo base bajo para que sea responsivo.
-    startAllZonesPolling(IOS_FIXED_UI_MODE ? 1500 : 2500);
+    // 2C2B se lee CADA ciclo (1 s en iOS) → los cambios de potencia hechos en el
+    // display físico se reflejan en el cliente en ~1 s. 8FEC/2C28 solo 1 de cada 4 ciclos.
+    startAllZonesPolling(IOS_FIXED_UI_MODE ? 1000 : 2500);
 
     // Abrir log automáticamente para ver el diagnóstico
     const lp = $('logPanel');
