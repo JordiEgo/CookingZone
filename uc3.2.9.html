@@ -1323,7 +1323,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-C';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-D';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -3494,9 +3494,11 @@ async function connectCookingZoneFlow() {
       diag.innerHTML = diagHtml;
     }
 
-    // iOS/Bluefy: las notificaciones no siempre se activan → poll de todas las zonas.
-    // También sirve de respaldo en cualquier plataforma para mantener ambas CZ pobladas.
-    startAllZonesPolling(IOS_FIXED_UI_MODE ? 1800 : 3000);
+    // Poll de respaldo SOLO para estado/control (2C2B, 8FEC, 2C28), que no llegan
+    // por notificación. El sensor llega por notificación, así que el poll lo omite.
+    // En iOS/Bluefy usamos un intervalo lento (cada lectura es cara y serializada);
+    // en Android es aún más espaciado porque las notificaciones cubren casi todo.
+    startAllZonesPolling(IOS_FIXED_UI_MODE ? 5000 : 6000);
 
     // Abrir log automáticamente para ver el diagnóstico
     const lp = $('logPanel');
