@@ -1353,6 +1353,8 @@ const MSD_TAG_CWD_TEMPERATURE = 0x01;
 const MSD_BLOCK_SIZE = 21;
 const SENSOR_TRIGGER_INTERVAL_UNITS = 40; // 40 * 100ms = 4s
 const FORCE_REVERSED_ZONE_DETECTION = true;
+const IOS_FIXED_UI_MODE = /iPad|iPhone|iPod/i.test(navigator.userAgent || '');
+const IOS_FIXED_ZONE_COUNT = 2;
 const ACTUAL_TEMP_MIN_C = -40;
 const ACTUAL_TEMP_MAX_C = 350;
 const ACTUAL_HUMIDITY_MIN_PCT = 0;
@@ -1381,6 +1383,7 @@ let actualCtrlPollTimer = null;
 let czControlCharsByZone = [];
 let czControlHandlersByZone = [];
 let czControlWaitersByZone = [];
+let desiredCtrlCharsByZone = [];
 let cookingStepStatusCharsByZone = [];
 let cookingStepStatusHandlersByZone = [];
 let zoneUiState = [];
@@ -1392,6 +1395,7 @@ let czLiveDetailsVisible = false;
 let czRecipeTargetVisible = false;
 let ftsServiceCache = null;
 let ftsCharsCache = null;
+let lastSensorNotifLogMsByZone = [];
 
 async function getFtsCharsFromActiveConnection() {
   if (!applianceGatt?.connected) throw new Error('Appliance not connected');
@@ -1552,8 +1556,96 @@ function decodeDescriptionText(dataView) {
   }
 }
 
+function getTargetZoneCount() {
+  if (IOS_FIXED_UI_MODE) return IOS_FIXED_ZONE_COUNT;
+  return Math.max(1, czServices.length);
+}
+
+async function getCharacteristicListForService(service, uuid) {
+  let chars = [];
+  try {
+    chars = await service.getCharacteristics(uuid);
+  } catch (_) {
+    chars = [];
+  }
+  if (!chars || !chars.length) {
+    try {
+      const single = await service.getCharacteristic(uuid);
+      chars = single ? [single] : [];
+    } catch (_) {
+      chars = [];
+    }
+  }
+  return chars || [];
+}
+
+function splitCharacteristicListForZones(chars, zoneCount, multiPerZone = false) {
+  if (multiPerZone) {
+    const out = Array.from({ length: zoneCount }, () => []);
+    if (!chars || !chars.length) return out;
+    if (zoneCount <= 1) {
+      out[0] = chars.slice();
+      return out;
+    }
+    const perZone = Math.max(1, Math.floor(chars.length / zoneCount));
+    let cursor = 0;
+    for (let i = 0; i < zoneCount; i++) {
+      const end = (i === zoneCount - 1) ? chars.length : Math.min(chars.length, cursor + perZone);
+      out[i] = chars.slice(cursor, end);
+      cursor = end;
+    }
+    return out;
+  }
+
+  const out = Array.from({ length: zoneCount }, () => null);
+  if (!chars || !chars.length) return out;
+  for (let i = 0; i < zoneCount; i++) out[i] = chars[i] || null;
+  return out;
+}
+
+async function resolveSingleCharsByZone(uuid) {
+  syncZoneUiState();
+  const zoneCount = zoneUiState.length;
+  const out = Array.from({ length: zoneCount }, () => null);
+  if (!czServices.length) return out;
+
+  if (czServices.length === 1 && zoneCount > 1) {
+    const chars = await getCharacteristicListForService(czServices[0], uuid);
+    return splitCharacteristicListForZones(chars, zoneCount, false);
+  }
+
+  for (let i = 0; i < zoneCount; i++) {
+    const serviceIdx = getServiceIndexForUi(i);
+    const svc = czServices[Math.min(serviceIdx, czServices.length - 1)] || czServices[0];
+    if (!svc) continue;
+    const chars = await getCharacteristicListForService(svc, uuid);
+    out[i] = chars[0] || null;
+  }
+  return out;
+}
+
+async function resolveMultiCharsByZone(uuid) {
+  syncZoneUiState();
+  const zoneCount = zoneUiState.length;
+  const out = Array.from({ length: zoneCount }, () => []);
+  if (!czServices.length) return out;
+
+  if (czServices.length === 1 && zoneCount > 1) {
+    const chars = await getCharacteristicListForService(czServices[0], uuid);
+    return splitCharacteristicListForZones(chars, zoneCount, true);
+  }
+
+  for (let i = 0; i < zoneCount; i++) {
+    const serviceIdx = getServiceIndexForUi(i);
+    const svc = czServices[Math.min(serviceIdx, czServices.length - 1)] || czServices[0];
+    if (!svc) continue;
+    out[i] = await getCharacteristicListForService(svc, uuid);
+  }
+  return out;
+}
+
 function syncZoneUiState() {
-  const count = Math.max(1, czServices.length);
+  const count = getTargetZoneCount();
   if (zoneUiState.length !== count) {
     const next = Array.from({ length: count }, (_, i) => zoneUiState[i] || createDefaultZoneState());
     zoneUiState = next;
@@ -2031,8 +2123,11 @@ function log(msg, err = false) {
   const box = $('logBox');
   const ts = new Date().toLocaleTimeString();
   box.textContent += `[${ts}] ${err ? '[ERR] ' : ''}${msg}\n`;
-  const lines = box.textContent.split('\n');
-  if (lines.length > 300) box.textContent = lines.slice(-300).join('\n');
+  // Keep only tail to avoid expensive split/join on every BLE event.
+  const MAX_LOG_CHARS = 22000;
+  if (box.textContent.length > MAX_LOG_CHARS) {
+    box.textContent = box.textContent.slice(-MAX_LOG_CHARS);
+  }
   box.scrollTop = box.scrollHeight;
 }
 
@@ -2367,62 +2462,44 @@ async function bindAllSensorCharacteristics() {
   let totalBound = 0;
   let totalAggregateBound = 0;
 
-  for (let i = 0; i < czServices.length; i++) {
-    try {
-      const serviceIdx = getServiceIndexForUi(i);
-      let chars = await czServices[serviceIdx].getCharacteristics(UUID_CZ_SENSOR_DATA);
-      if (!chars || !chars.length) {
-        const single = await czServices[serviceIdx].getCharacteristic(UUID_CZ_SENSOR_DATA);
-        chars = single ? [single] : [];
-      }
+  const sensorGroups = await resolveMultiCharsByZone(UUID_CZ_SENSOR_DATA);
+  const aggregateGroups = await resolveMultiCharsByZone(UUID_CZ_SENSOR_AGGR);
 
-      sensorCharsByZone[i] = [];
-      sensorHandlersByZone[i] = [];
+  for (let i = 0; i < sensorGroups.length; i++) {
+    const chars = sensorGroups[i] || [];
+    sensorCharsByZone[i] = [];
+    sensorHandlersByZone[i] = [];
 
-      chars.forEach((ch, idx) => {
-        const sensorSlot = idx + 1;
-        const handler = (event) => onSensorNotification(event, i, sensorSlot);
-        ch.addEventListener('characteristicvaluechanged', handler);
-        sensorCharsByZone[i].push(ch);
-        sensorHandlersByZone[i].push(handler);
-        const p = ch.properties || {};
-        log(`CZ${i + 1}: sensor${sensorSlot} bound (notify=${!!p.notify}, indicate=${!!p.indicate}, read=${!!p.read})`);
-      });
+    chars.forEach((ch, idx) => {
+      const sensorSlot = idx + 1;
+      const handler = (event) => onSensorNotification(event, i, sensorSlot);
+      ch.addEventListener('characteristicvaluechanged', handler);
+      sensorCharsByZone[i].push(ch);
+      sensorHandlersByZone[i].push(handler);
+      const p = ch.properties || {};
+      log(`CZ${i + 1}: sensor${sensorSlot} bound (notify=${!!p.notify}, indicate=${!!p.indicate}, read=${!!p.read})`);
+    });
 
-      totalBound += sensorCharsByZone[i].length;
+    totalBound += sensorCharsByZone[i].length;
 
-      try {
-        let aggregateChars = await czServices[serviceIdx].getCharacteristics(UUID_CZ_SENSOR_AGGR);
-        if (!aggregateChars || !aggregateChars.length) {
-          const singleAgg = await czServices[serviceIdx].getCharacteristic(UUID_CZ_SENSOR_AGGR);
-          aggregateChars = singleAgg ? [singleAgg] : [];
+    const aggregateChars = aggregateGroups[i] || [];
+    sensorAggregateCharsByZone[i] = [];
+    sensorAggregateHandlersByZone[i] = [];
+
+    aggregateChars.forEach((aggregateChar, aggIdx) => {
+      const aggregateHandler = (event) => {
+        if (!IOS_FIXED_UI_MODE) {
+          const rawHex = dataViewToHex(event.target.value);
+          log(`CZ${i + 1} sensor aggregate${aggIdx + 1}: notif -> ${rawHex}`);
         }
-
-        sensorAggregateCharsByZone[i] = [];
-        sensorAggregateHandlersByZone[i] = [];
-
-        aggregateChars.forEach((aggregateChar, aggIdx) => {
-          const aggregateHandler = (event) => {
-            const rawHex = dataViewToHex(event.target.value);
-            log(`CZ${i + 1} sensor aggregate${aggIdx + 1}: notif -> ${rawHex}`);
-          };
-          aggregateChar.addEventListener('characteristicvaluechanged', aggregateHandler);
-          sensorAggregateCharsByZone[i].push(aggregateChar);
-          sensorAggregateHandlersByZone[i].push(aggregateHandler);
-          const pAgg = aggregateChar.properties || {};
-          totalAggregateBound += 1;
-          log(`CZ${i + 1}: sensorAggregate${aggIdx + 1} bound (notify=${!!pAgg.notify}, indicate=${!!pAgg.indicate}, read=${!!pAgg.read})`);
-        });
-      } catch (eAgg) {
-        log(`CZ${i + 1}: sensor aggregate bind failed (${eAgg.message})`, true);
-      }
-    } catch (e) {
-      log(`CZ${i + 1}: sensor bind failed (${e.message})`, true);
-      sensorCharsByZone[i] = [];
-      sensorHandlersByZone[i] = [];
-      sensorAggregateCharsByZone[i] = [];
-      sensorAggregateHandlersByZone[i] = [];
-    }
+      };
+      aggregateChar.addEventListener('characteristicvaluechanged', aggregateHandler);
+      sensorAggregateCharsByZone[i].push(aggregateChar);
+      sensorAggregateHandlersByZone[i].push(aggregateHandler);
+      const pAgg = aggregateChar.properties || {};
+      totalAggregateBound += 1;
+      log(`CZ${i + 1}: sensorAggregate${aggIdx + 1} bound (notify=${!!pAgg.notify}, indicate=${!!pAgg.indicate}, read=${!!pAgg.read})`);
+    });
   }
 
   if (!totalBound && !totalAggregateBound) {
@@ -2529,22 +2606,22 @@ async function bindAllActualControlCharacteristics() {
   actualCtrlCharsByZone = [];
   actualCtrlHandlersByZone = [];
 
-  for (let i = 0; i < czServices.length; i++) {
-    try {
-      const serviceIdx = getServiceIndexForUi(i);
-      const ch = await czServices[serviceIdx].getCharacteristic(UUID_CZ_ACTUAL_CTRL);
-      actualCtrlCharsByZone[i] = ch;
-      const handler = async (event) => {
-        const parsed = parseActualCookingConditions(event.target.value, `CZ${i + 1}`);
-        updateZoneFromActualConditions(i, parsed);
-        renderCooktopZones();
-      };
-      ch.addEventListener('characteristicvaluechanged', handler);
-      actualCtrlHandlersByZone[i] = handler;
-      log(`CZ${i + 1}: 2C2B bound on service ${serviceIdx + 1}`);
-    } catch (e) {
-      log(`CZ${i + 1}: actual conditions bind failed (${e.message})`, true);
+  const charsByZone = await resolveSingleCharsByZone(UUID_CZ_ACTUAL_CTRL);
+  for (let i = 0; i < charsByZone.length; i++) {
+    const ch = charsByZone[i];
+    if (!ch) {
+      log(`CZ${i + 1}: actual conditions bind failed (characteristic not found)`, true);
+      continue;
     }
+    actualCtrlCharsByZone[i] = ch;
+    const handler = async (event) => {
+      const parsed = parseActualCookingConditions(event.target.value, `CZ${i + 1}`);
+      updateZoneFromActualConditions(i, parsed);
+      renderCooktopZones();
+    };
+    ch.addEventListener('characteristicvaluechanged', handler);
+    actualCtrlHandlersByZone[i] = handler;
+    log(`CZ${i + 1}: 2C2B bound`);
   }
 }
 
@@ -2560,22 +2637,22 @@ async function bindAllCzControlCharacteristics() {
   czControlCharsByZone = [];
   czControlHandlersByZone = [];
 
-  for (let i = 0; i < czServices.length; i++) {
-    try {
-      const serviceIdx = getServiceIndexForUi(i);
-      const ch = await czServices[serviceIdx].getCharacteristic(UUID_CZ_CONTROL);
-      czControlCharsByZone[i] = ch;
-      const handler = (event) => {
-        const parsed = parseCzControlPayload(event.target.value);
-        updateZoneFromCzControl(i, parsed, 'indication');
-        renderCooktopZones();
-      };
-      ch.addEventListener('characteristicvaluechanged', handler);
-      czControlHandlersByZone[i] = handler;
-      log(`CZ${i + 1}: 8FEC bound on service ${serviceIdx + 1}`);
-    } catch (e) {
-      log(`CZ${i + 1}: 8FEC bind failed (${e.message})`, true);
+  const charsByZone = await resolveSingleCharsByZone(UUID_CZ_CONTROL);
+  for (let i = 0; i < charsByZone.length; i++) {
+    const ch = charsByZone[i];
+    if (!ch) {
+      log(`CZ${i + 1}: 8FEC bind failed (characteristic not found)`, true);
+      continue;
     }
+    czControlCharsByZone[i] = ch;
+    const handler = (event) => {
+      const parsed = parseCzControlPayload(event.target.value);
+      updateZoneFromCzControl(i, parsed, 'indication');
+      renderCooktopZones();
+    };
+    ch.addEventListener('characteristicvaluechanged', handler);
+    czControlHandlersByZone[i] = handler;
+    log(`CZ${i + 1}: 8FEC bound`);
   }
 }
 
@@ -2591,32 +2668,32 @@ async function bindAllCzCookingStepStatusCharacteristics() {
   cookingStepStatusCharsByZone = [];
   cookingStepStatusHandlersByZone = [];
 
-  for (let i = 0; i < czServices.length; i++) {
-    try {
-      const serviceIdx = getServiceIndexForUi(i);
-      const ch = await czServices[serviceIdx].getCharacteristic(UUID_CZ_COOKING_STEP_STATUS);
-      cookingStepStatusCharsByZone[i] = ch;
-      const handler = (event) => {
-        const dataView = event.target.value;
-        const flags = dataView.getUint8(0);
-        const stepIndex = dataView.getUint16(1, true);
-        const remainingTime = dataView.getUint16(3, true);
-        const logMsg = `CZ${i + 1}: Step Status - flags=${flags}, step=${stepIndex}, remaining=${remainingTime}`;
-        log(logMsg);
-        
-        // If remaining time is 0, recipe has completed
-        if (remainingTime === 0) {
-          log(`CZ${i + 1}: Recipe step completed (remaining_time = 0)`, false);
-          setZoneRecipeRunning(i, false);
-          renderCooktopZones();
-        }
-      };
-      ch.addEventListener('characteristicvaluechanged', handler);
-      cookingStepStatusHandlersByZone[i] = handler;
-      log(`CZ${i + 1}: 2C28 (Cooking Step Status) bound on service ${serviceIdx + 1}`);
-    } catch (e) {
-      log(`CZ${i + 1}: Cooking Step Status bind failed (${e.message})`, true);
+  const charsByZone = await resolveSingleCharsByZone(UUID_CZ_COOKING_STEP_STATUS);
+  for (let i = 0; i < charsByZone.length; i++) {
+    const ch = charsByZone[i];
+    if (!ch) {
+      log(`CZ${i + 1}: Cooking Step Status bind failed (characteristic not found)`, true);
+      continue;
     }
+    cookingStepStatusCharsByZone[i] = ch;
+    const handler = (event) => {
+      const dataView = event.target.value;
+      const flags = dataView.getUint8(0);
+      const stepIndex = dataView.getUint16(1, true);
+      const remainingTime = dataView.getUint16(3, true);
+      const logMsg = `CZ${i + 1}: Step Status - flags=${flags}, step=${stepIndex}, remaining=${remainingTime}`;
+      log(logMsg);
+
+      // If remaining time is 0, recipe has completed
+      if (remainingTime === 0) {
+        log(`CZ${i + 1}: Recipe step completed (remaining_time = 0)`, false);
+        setZoneRecipeRunning(i, false);
+        renderCooktopZones();
+      }
+    };
+    ch.addEventListener('characteristicvaluechanged', handler);
+    cookingStepStatusHandlersByZone[i] = handler;
+    log(`CZ${i + 1}: 2C28 (Cooking Step Status) bound`);
   }
 }
 
@@ -2641,10 +2718,11 @@ async function primeAllCzControlStatesOnce() {
 
 async function primeZoneDescriptions() {
   syncZoneUiState();
-  for (let i = 0; i < czServices.length; i++) {
+  const charsByZone = await resolveSingleCharsByZone(UUID_CZ_DESCRIPTION);
+  for (let i = 0; i < zoneUiState.length; i++) {
     try {
-      const serviceIdx = getServiceIndexForUi(i);
-      const desc = await czServices[serviceIdx].getCharacteristic(UUID_CZ_DESCRIPTION);
+      const desc = charsByZone[i];
+      if (!desc) throw new Error('characteristic not found');
       const dv = await desc.readValue();
       if (zoneUiState[i]) {
         const hex = dataViewToHex(dv);
@@ -2652,7 +2730,7 @@ async function primeZoneDescriptions() {
         zoneUiState[i].descriptionHex = hex;
         zoneUiState[i].descriptionText = decodeDescriptionText(dv);
       }
-      log(`CZ${i + 1}: description read from service ${serviceIdx + 1}`);
+      log(`CZ${i + 1}: description read`);
     } catch (e) {
       if (zoneUiState[i]) {
         zoneUiState[i].descriptionReady = false;
@@ -2667,7 +2745,7 @@ async function primeZoneDescriptions() {
 
 async function primeZoneCapabilities() {
   syncZoneUiState();
-  for (let i = 0; i < czServices.length; i++) {
+  for (let i = 0; i < zoneUiState.length; i++) {
     if (!zoneUiState[i]) continue;
     zoneUiState[i].capabilitiesReady = false;
     zoneUiState[i].capabilitiesError = '';
@@ -2675,10 +2753,11 @@ async function primeZoneCapabilities() {
   }
   renderCooktopZones();
 
-  for (let i = 0; i < czServices.length; i++) {
+  const charsByZone = await resolveSingleCharsByZone(UUID_CZ_CAPABILITIES);
+  for (let i = 0; i < zoneUiState.length; i++) {
     try {
-      const serviceIdx = getServiceIndexForUi(i);
-      const cap = await getZoneCapabilitiesCharacteristic(czServices[serviceIdx]);
+      const cap = charsByZone[i];
+      if (!cap) throw new Error('characteristic not found');
       const dv = await cap.readValue();
       const parsed = parseZoneCapabilitiesPayload(dv);
       if (zoneUiState[i]) {
@@ -2690,9 +2769,9 @@ async function primeZoneCapabilities() {
         zoneUiState[i].tempRangeMinC = Number.isFinite(parsed?.minTempC) ? parsed.minTempC : null;
       }
       if (parsed) {
-        log(`CZ${i + 1}: capabilities read from service ${serviceIdx + 1} (offset=${parsed.offset}, flags=0x${parsed.flags.toString(16).padStart(4, '0').toUpperCase()})`);
+        log(`CZ${i + 1}: capabilities read (offset=${parsed.offset}, flags=0x${parsed.flags.toString(16).padStart(4, '0').toUpperCase()})`);
       } else {
-        log(`CZ${i + 1}: capabilities read from service ${serviceIdx + 1} but payload parse failed`, true);
+        log(`CZ${i + 1}: capabilities read but payload parse failed`, true);
       }
     } catch (e) {
       if (zoneUiState[i]) {
@@ -2797,8 +2876,9 @@ function onSensorNotification(event, zoneIdx, sensorSlot = 1) {
   if (!v) return;
 
   syncZoneUiState();
+  const prev = zoneUiState[zoneIdx]?.sensorTemp;
   if (zoneUiState[zoneIdx]) zoneUiState[zoneIdx].sensorTemp = v.tempC;
-  renderCooktopZones();
+  if (prev !== v.tempC) renderCooktopZones();
 
   if (zoneIdx === activeZoneIdx) {
     const sensorVal = $('sensor1Val');
@@ -2806,7 +2886,12 @@ function onSensorNotification(event, zoneIdx, sensorSlot = 1) {
     if (sensorVal) sensorVal.textContent = v.tempC + ' °C';
     if (sensorRaw) sensorRaw.textContent = 'raw: ' + v.rawHex;
   }
-  log(`CZ${zoneIdx + 1} Sensor${sensorSlot} notif → ${v.tempC} °C (0x${v.rawHex})`);
+  const now = Date.now();
+  const last = lastSensorNotifLogMsByZone[zoneIdx] || 0;
+  if (!IOS_FIXED_UI_MODE || (now - last >= 1200 && sensorSlot === 1)) {
+    log(`CZ${zoneIdx + 1} Sensor${sensorSlot} notif → ${v.tempC} °C (0x${v.rawHex})`);
+    lastSensorNotifLogMsByZone[zoneIdx] = now;
+  }
 }
 
 async function enableSensorNotifications() {
@@ -2897,7 +2982,7 @@ async function disableSensorNotifications() {
 function renderZones() {
   const container = $('zoneButtons');
   container.innerHTML = '';
-  const count = Math.max(1, czServices.length);
+  const count = getTargetZoneCount();
   syncZoneUiState();
 
   for (let i = 0; i < count; i++) {
@@ -2968,11 +3053,11 @@ async function writeDesiredPower(zoneIdx, pct) {
   }
 
   try {
-    const serviceIdx = getServiceIndexForUi(zoneIdx);
-    const svc = czServices[Math.min(serviceIdx, czServices.length - 1)] || czServices[0];
-    if (!svc) throw new Error('No Cooking Zone service available');
-
-    const ch = await svc.getCharacteristic(UUID_CZ_DESIRED_CTRL);
+    if (!desiredCtrlCharsByZone.length) {
+      desiredCtrlCharsByZone = await resolveSingleCharsByZone(UUID_CZ_DESIRED_CTRL);
+    }
+    const ch = desiredCtrlCharsByZone[zoneIdx] || desiredCtrlCharsByZone[0];
+    if (!ch) throw new Error('No Desired Control characteristic available');
     const flags = 0x0001; // Power Level present
     const powerX10 = Math.max(0, Math.min(1000, Math.round(pct * 10)));
     const payload = new Uint8Array([
@@ -3011,11 +3096,11 @@ async function writeDesiredTemperature(zoneIdx, tempC) {
   const clampedTemp = Math.max(minTemp, Math.min(maxTemp, tempC));
 
   try {
-    const serviceIdx = getServiceIndexForUi(zoneIdx);
-    const svc = czServices[Math.min(serviceIdx, czServices.length - 1)] || czServices[0];
-    if (!svc) throw new Error('No Cooking Zone service available');
-
-    const ch = await svc.getCharacteristic(UUID_CZ_DESIRED_CTRL);
+    if (!desiredCtrlCharsByZone.length) {
+      desiredCtrlCharsByZone = await resolveSingleCharsByZone(UUID_CZ_DESIRED_CTRL);
+    }
+    const ch = desiredCtrlCharsByZone[zoneIdx] || desiredCtrlCharsByZone[0];
+    if (!ch) throw new Error('No Desired Control characteristic available');
     const flags = 0x0002; // Temperature present
     const tempX10 = Math.max(-32768, Math.min(32767, Math.round(clampedTemp * 10)));
     const tempU16 = tempX10 & 0xFFFF;
@@ -3285,8 +3370,10 @@ function onApplianceDisconnected() {
   actualCtrlHandlersByZone = [];
   czControlCharsByZone = [];
   czControlHandlersByZone = [];
+  desiredCtrlCharsByZone = [];
   cookingStepStatusCharsByZone = [];
   cookingStepStatusHandlersByZone = [];
+  lastSensorNotifLogMsByZone = [];
   sensorNotifEnabled = false;
   sensorAggregateCharsByZone = [];
   sensorAggregateHandlersByZone = [];
@@ -3403,8 +3490,9 @@ async function writeCzControl(opCode) {
   setCzControlButtonsDisabled(true);
 
   try {
-    const svc = await getActiveZoneService();
-    const ch = await svc.getCharacteristic(UUID_CZ_CONTROL);
+    if (!czControlCharsByZone.length) await bindAllCzControlCharacteristics();
+    const ch = czControlCharsByZone[activeZoneIdx] || czControlCharsByZone[0];
+    if (!ch) throw new Error('No CZ Control characteristic available');
 
     let payloadCandidates = [];
     if (opCode === 0x00) {
