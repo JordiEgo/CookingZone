@@ -2401,16 +2401,26 @@ function startSensorPolling() {
     }
     try {
       if (!sensorCharsByZone.length) return;
-      const group = sensorCharsByZone[Math.min(activeZoneIdx, sensorCharsByZone.length - 1)] || sensorCharsByZone[0] || [];
-      const ch = group[0] || null;
-      if (!ch) return;
-      const v = await ch.readValue();
-      const parsed = parseSensor1Temp(v);
-      if (!parsed) return;
-      const sensorVal = $('sensor1Val');
-      const sensorRaw = $('sensorRaw');
-      if (sensorVal) sensorVal.textContent = parsed.tempC + ' °C';
-      if (sensorRaw) sensorRaw.textContent = 'raw: ' + parsed.rawHex;
+      let changed = false;
+      for (let zoneIdx = 0; zoneIdx < sensorCharsByZone.length; zoneIdx++) {
+        const group = sensorCharsByZone[zoneIdx] || [];
+        const ch = group[0] || null;
+        if (!ch) continue;
+        const v = await ch.readValue();
+        const parsed = parseSensor1Temp(v);
+        if (!parsed) continue;
+        syncZoneUiState();
+        const prev = zoneUiState[zoneIdx]?.sensorTemp;
+        if (zoneUiState[zoneIdx]) zoneUiState[zoneIdx].sensorTemp = parsed.tempC;
+        if (prev !== parsed.tempC) changed = true;
+        if (zoneIdx === activeZoneIdx) {
+          const sensorVal = $('sensor1Val');
+          const sensorRaw = $('sensorRaw');
+          if (sensorVal) sensorVal.textContent = parsed.tempC + ' °C';
+          if (sensorRaw) sensorRaw.textContent = 'raw: ' + parsed.rawHex;
+        }
+      }
+      if (changed) renderCooktopZones();
     } catch (_) {
       // Keep polling; transient read failures are expected on some BLE stacks.
     }
@@ -2908,20 +2918,21 @@ async function enableSensorNotifications() {
       const ch = group[j];
       if (!ch) continue;
       total += 1;
-      const canNotify = !!(ch.properties?.notify || ch.properties?.indicate);
-      if (!canNotify) {
-        log(`CZ${i + 1} sensor${j + 1}: notify/indicate not supported`, true);
-        if (ch.properties?.read) readable += 1;
-        continue;
+      if (ch.properties?.read) readable += 1;
+      let ok = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await delay(140 * attempt);
+          await ch.startNotifications();
+          ok = true;
+          break;
+        } catch (e) {
+          if (attempt === 3) {
+            log(`CZ${i + 1} sensor${j + 1}: notification enable failed (${e.message})`, true);
+          }
+        }
       }
-      try {
-        await ch.startNotifications();
-        enabled += 1;
-        if (ch.properties?.read) readable += 1;
-      } catch (e) {
-        log(`CZ${i + 1} sensor${j + 1}: notification enable failed (${e.message})`, true);
-        if (ch.properties?.read) readable += 1;
-      }
+      if (ok) enabled += 1;
     }
 
     const aggregateGroup = sensorAggregateCharsByZone[i] || [];
@@ -2929,35 +2940,41 @@ async function enableSensorNotifications() {
       const aggregateChar = aggregateGroup[j];
       if (!aggregateChar) continue;
       total += 1;
-      const canNotifyAgg = !!(aggregateChar.properties?.notify || aggregateChar.properties?.indicate);
-      if (!canNotifyAgg) {
-        log(`CZ${i + 1} sensor aggregate${j + 1}: notify/indicate not supported`, true);
-      } else {
+      let okAgg = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
         try {
+          await delay(120 * attempt);
           await aggregateChar.startNotifications();
-          aggregateEnabled += 1;
+          okAgg = true;
+          break;
         } catch (e) {
-          log(`CZ${i + 1} sensor aggregate${j + 1}: notification enable failed (${e.message})`, true);
+          if (attempt === 3) {
+            log(`CZ${i + 1} sensor aggregate${j + 1}: notification enable failed (${e.message})`, true);
+          }
         }
       }
+      if (okAgg) aggregateEnabled += 1;
     }
   }
 
-  sensorNotifEnabled = (enabled + aggregateEnabled) > 0;
-  if (sensorNotifEnabled) {
-    setNotifStatus(`🔔 live (${enabled + aggregateEnabled}/${total})`, true);
-    log(`Notifications enabled on ${enabled + aggregateEnabled}/${total} characteristics (including aggregate)`);
+  const notifCount = enabled + aggregateEnabled;
+  sensorNotifEnabled = notifCount > 0;
+  if (notifCount > 0 && notifCount < total && readable > 0) {
+    // Partial success: keep live notifications and poll missing channels.
+    startSensorPolling();
+    setNotifStatus(`🔔 live (${notifCount}/${total}) + polling`, true);
+    log(`Notifications partially enabled (${notifCount}/${total}); polling fallback also active`, true);
+  } else if (sensorNotifEnabled) {
+    setNotifStatus(`🔔 live (${notifCount}/${total})`, true);
+    log(`Notifications enabled on ${notifCount}/${total} characteristics (including aggregate)`);
+  } else if (readable > 0) {
+    startSensorPolling();
+    sensorNotifEnabled = true;
+    setNotifStatus('🔔 live (polling)', true);
+    log('Notifications not available; switched to live polling mode', true);
   } else {
-    // Fallback for firmwares/characteristics that don't expose notify reliably in Web Bluetooth.
-    if (readable > 0) {
-      startSensorPolling();
-      sensorNotifEnabled = true;
-      setNotifStatus('🔔 live (polling)', true);
-      log('Notifications unsupported; switched to live polling mode', true);
-    } else {
-      setNotifStatus('off', false);
-      throw new Error('No notify/indicate support and characteristic is not readable');
-    }
+    setNotifStatus('off', false);
+    throw new Error('No notification or polling path available for sensors');
   }
 }
 
