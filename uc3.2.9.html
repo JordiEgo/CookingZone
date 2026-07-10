@@ -1323,7 +1323,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-A';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-B';
 
 const CZ_SERVICE_UUID = '00008ff8-0000-1000-8000-00805f9b34fb';
 const UUID_CZ_SENSOR_DATA = '00008fea-0000-1000-8000-00805f9b34fb';
@@ -1360,7 +1360,10 @@ const MSD_BLOCK_SIZE = 21;
 const SENSOR_TRIGGER_INTERVAL_UNITS = 40; // 40 * 100ms = 4s
 const FORCE_REVERSED_ZONE_DETECTION = true;
 const IOS_FIXED_UI_MODE = /iPad|iPhone|iPod/i.test(navigator.userAgent || '');
-const IOS_FIXED_ZONE_COUNT = 2;
+// iOS/Bluefy colapsa el servicio y las características duplicadas (0x8FF8) a UNA sola
+// instancia, por lo que la 2ª cooking zone es inalcanzable vía Web Bluetooth.
+// En iOS mostramos solo las zonas realmente accesibles (1). En Android/desktop, 2.
+const IOS_FIXED_ZONE_COUNT = 1;
 const ACTUAL_TEMP_MIN_C = -40;
 const ACTUAL_TEMP_MAX_C = 350;
 const ACTUAL_HUMIDITY_MIN_PCT = 0;
@@ -1565,8 +1568,12 @@ function decodeDescriptionText(dataView) {
 }
 
 function getTargetZoneCount() {
-  // Este dispositivo siempre tiene 2 cooking zones. Forzamos mínimo 2 tiles
-  // desde el inicio para que ambas ventanas de texto estén siempre presentes.
+  // iOS/Bluefy solo puede acceder a UNA cooking zone (colapsa el servicio duplicado),
+  // así que en iOS mostramos únicamente las zonas realmente accesibles.
+  if (IOS_FIXED_UI_MODE) {
+    return Math.max(IOS_FIXED_ZONE_COUNT, czServices.length);
+  }
+  // En Android/desktop el dispositivo expone 2 cooking zones; forzamos 2 tiles fijos.
   return Math.max(2, czServices.length);
 }
 
@@ -1931,7 +1938,7 @@ function renderCooktopZones() {
   syncZoneUiState();
   const summaryHost = $('cooktopSummary');
   const host = $('cooktopZones');
-  const detectedZones = zoneUiState.length; // siempre ≥ 2 (getTargetZoneCount)
+  const detectedZones = zoneUiState.length; // iOS/Bluefy: 1 · Android/desktop: ≥ 2
 
   if (summaryHost) {
     if (detectedZones > 0) {
@@ -3379,7 +3386,11 @@ async function connectCookingZoneFlow() {
     syncZoneUiState();
     log(`Using ${czServices.length} CZ service(s). Zone mapping: ${uiToServiceMap.map((svc, ui) => `UI CZ${ui + 1}->SVC${svc + 1}`).join(', ')}`);
     if (czServices.length < 2) {
-      log('⚠️ Only 1 CZ service instance visible — zone 2 may rely on duplicated characteristics within the single service', true);
+      if (IOS_FIXED_UI_MODE) {
+        log('iOS/Bluefy: solo 1 cooking zone accesible (limitación de UUID duplicado). Mostrando 1 zona.');
+      } else {
+        log('⚠️ Only 1 CZ service instance visible — zone 2 may rely on duplicated characteristics within the single service', true);
+      }
     }
     renderZones();
 
@@ -3414,15 +3425,21 @@ async function connectCookingZoneFlow() {
     // Diagnóstico VISIBLE en pantalla: cuántos servicios/chars por zona detectamos.
     const diag = $('discoveryDiag');
     if (diag) {
+      const zoneCount = zoneUiState.length;
       const cz1_2c2b = actualCtrlCharsByZone[0] ? '✓' : '✗';
-      const cz2_2c2b = actualCtrlCharsByZone[1] ? '✓' : '✗';
       const cz1_sens = (sensorCharsByZone[0] || []).length;
-      const cz2_sens = (sensorCharsByZone[1] || []).length;
       diag.style.display = 'block';
-      diag.innerHTML =
+      let diagHtml =
         `Servicios CZ: <b>${czServices.length}</b> · ` +
-        `CZ1[2C2B:${cz1_2c2b} sens:${cz1_sens}] · ` +
-        `CZ2[2C2B:${cz2_2c2b} sens:${cz2_sens}]`;
+        `CZ1[2C2B:${cz1_2c2b} sens:${cz1_sens}]`;
+      if (zoneCount > 1) {
+        const cz2_2c2b = actualCtrlCharsByZone[1] ? '✓' : '✗';
+        const cz2_sens = (sensorCharsByZone[1] || []).length;
+        diagHtml += ` · CZ2[2C2B:${cz2_2c2b} sens:${cz2_sens}]`;
+      } else if (IOS_FIXED_UI_MODE) {
+        diagHtml += ` · <i>iOS: 1 zona (UUID duplicado)</i>`;
+      }
+      diag.innerHTML = diagHtml;
     }
 
     // iOS/Bluefy: las notificaciones no siempre se activan → poll de todas las zonas.
