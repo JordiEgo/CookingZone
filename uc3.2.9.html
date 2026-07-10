@@ -1376,6 +1376,8 @@ let sensorAggregateCharsByZone = [];
 let sensorAggregateHandlersByZone = [];
 let sensorNotifEnabled = false;
 let sensorPollTimer = null;
+let allZonesPollTimer = null;
+let allZonesPollBusy = false;
 let associateAnimTimer = null;
 let actualCtrlCharsByZone = [];
 let actualCtrlHandlersByZone = [];
@@ -1562,11 +1564,18 @@ function getTargetZoneCount() {
 }
 
 async function getCharacteristicListForService(service, uuid) {
+  const shortUuid = (uuid.length >= 8) ? uuid.slice(4, 8).toUpperCase() : uuid;
   let chars = [];
-  try {
-    chars = await service.getCharacteristics(uuid);
-  } catch (_) {
-    chars = [];
+  // getCharacteristics() (plural) can throw on iOS/Bluefy if called too soon.
+  // Retry with growing delay so all duplicate characteristics are returned.
+  for (const waitMs of [0, 300, 700]) {
+    if (chars.length) break;
+    if (waitMs > 0) await delay(waitMs);
+    try {
+      chars = await service.getCharacteristics(uuid);
+    } catch (_) {
+      chars = [];
+    }
   }
   if (!chars || !chars.length) {
     try {
@@ -1576,7 +1585,9 @@ async function getCharacteristicListForService(service, uuid) {
       chars = [];
     }
   }
-  return chars || [];
+  chars = chars || [];
+  log(`0x${shortUuid}: getCharacteristics → ${chars.length} instance(s)`);
+  return chars;
 }
 
 function splitCharacteristicListForZones(chars, zoneCount, multiPerZone = false) {
@@ -2286,6 +2297,100 @@ function stopActualCtrlPolling() {
 function startActualCtrlPolling() {
   // Intentionally disabled: 2C2B must be indication-driven after initial connect read.
   stopActualCtrlPolling();
+}
+
+// ── Unified all-zones polling ──────────────────────────────────────────────
+// iOS/Bluefy frequently fails to enable CCCD notifications, but plain reads work.
+// This poller reads every characteristic for EVERY zone so both cooking zones
+// always stay populated, independent of notification support.
+function stopAllZonesPolling() {
+  if (allZonesPollTimer) {
+    clearInterval(allZonesPollTimer);
+    allZonesPollTimer = null;
+  }
+}
+
+async function pollAllZonesOnce() {
+  if (allZonesPollBusy) return;
+  if (!applianceGatt?.connected) { stopAllZonesPolling(); return; }
+  allZonesPollBusy = true;
+  let changed = false;
+  try {
+    syncZoneUiState();
+    const zoneCount = zoneUiState.length;
+    for (let z = 0; z < zoneCount; z++) {
+      // Sensor internal temperature (8FEA) — pick first readable sensor of the zone
+      const sensorGroup = sensorCharsByZone[z] || [];
+      for (let s = 0; s < sensorGroup.length; s++) {
+        const ch = sensorGroup[s];
+        if (!ch) continue;
+        try {
+          const v = await ch.readValue();
+          const parsed = parseSensor1Temp(v);
+          if (parsed) {
+            const prev = zoneUiState[z]?.sensorTemp;
+            if (zoneUiState[z]) zoneUiState[z].sensorTemp = parsed.tempC;
+            if (prev !== parsed.tempC) changed = true;
+            if (z === activeZoneIdx && s === 0) {
+              const sensorVal = $('sensor1Val');
+              const sensorRaw = $('sensorRaw');
+              if (sensorVal) sensorVal.textContent = parsed.tempC + ' °C';
+              if (sensorRaw) sensorRaw.textContent = 'raw: ' + parsed.rawHex;
+            }
+            break; // one good sensor read per zone is enough for the tile
+          }
+        } catch (_) { /* keep going */ }
+      }
+
+      // Actual cooking conditions (2C2B)
+      const actualCh = actualCtrlCharsByZone[z];
+      if (actualCh) {
+        try {
+          const dv = await actualCh.readValue();
+          const parsed = parseActualCookingConditions(dv, `CZ${z + 1}`);
+          updateZoneFromActualConditions(z, parsed);
+          changed = true;
+        } catch (_) { /* keep going */ }
+      }
+
+      // Cooking Zone Control (8FEC)
+      const ctrlCh = czControlCharsByZone[z];
+      if (ctrlCh) {
+        try {
+          const dv = await ctrlCh.readValue();
+          const parsed = parseCzControlPayload(dv);
+          updateZoneFromCzControl(z, parsed, 'read');
+          changed = true;
+        } catch (_) { /* keep going */ }
+      }
+
+      // Cooking Step Status (2C28)
+      const cssCh = cookingStepStatusCharsByZone[z];
+      if (cssCh) {
+        try {
+          const dv = await cssCh.readValue();
+          if (dv && dv.byteLength >= 5) {
+            const remainingTime = dv.getUint16(3, true);
+            if (remainingTime === 0 && zoneUiState[z]?.recipeRunning) {
+              setZoneRecipeRunning(z, false);
+              changed = true;
+            }
+          }
+        } catch (_) { /* keep going */ }
+      }
+    }
+  } finally {
+    allZonesPollBusy = false;
+    if (changed) renderCooktopZones();
+  }
+}
+
+function startAllZonesPolling(intervalMs = 2000) {
+  stopAllZonesPolling();
+  // Immediate first pass so the UI populates without waiting a full interval.
+  pollAllZonesOnce();
+  allZonesPollTimer = setInterval(pollAllZonesOnce, intervalMs);
+  log(`All-zones polling started (${intervalMs} ms)`);
 }
 
 function stopAssociateAnimation() {
@@ -3293,6 +3398,11 @@ async function connectCookingZoneFlow() {
       ...actualCtrlCharsByZone, ...czControlCharsByZone, ...cookingStepStatusCharsByZone
     ].filter(Boolean).length;
     log(`─── Setup complete: ${czServices.length} zone(s) | ${nSubs} char(s) bound ───`);
+
+    // iOS/Bluefy: las notificaciones no siempre se activan → poll de todas las zonas.
+    // También sirve de respaldo en cualquier plataforma para mantener ambas CZ pobladas.
+    startAllZonesPolling(IOS_FIXED_UI_MODE ? 1800 : 3000);
+
     // Abrir log automáticamente para ver el diagnóstico
     const lp = $('logPanel');
     if (lp.style.display === 'none') {
@@ -3399,6 +3509,7 @@ function onApplianceDisconnected() {
   rbStepsSentToCz = false;
   stopSensorPolling();
   stopActualCtrlPolling();
+  stopAllZonesPolling();
   setConnected(false);
   const sensorVal = $('sensor1Val');
   const sensorRaw = $('sensorRaw');
