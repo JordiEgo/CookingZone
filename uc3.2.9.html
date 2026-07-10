@@ -952,6 +952,7 @@
   <span class="page-title">CZ-Smartphone</span>
   <span class="uc-badge">USE CASE 3.2</span>
   <span class="wbt-badge">Native Web BT</span>
+  <span id="versionBadge" class="wbt-badge" style="background:#fef08a;border-color:#eab308;color:#713f12;">v?</span>
 </div>
 
 <div id="nobtWarn" class="warn-banner" style="display:none">
@@ -973,6 +974,7 @@
     <span class="notif-label">Notifications:</span>
     <span id="notifStatus" class="notif-badge">off</span>
   </div>
+  <div id="discoveryDiag" style="font-size:11px;color:#6f6558;background:#f8f5ee;border:1px solid #e3dccb;border-radius:6px;padding:4px 8px;margin-bottom:8px;display:none;font-family:monospace;"></div>
   <div class="zone-wrap">
     <span class="zone-label">Active Cooking Zone</span>
     <div id="zoneButtons" class="zone-buttons" role="radiogroup" aria-label="Active Cooking Zone"></div>
@@ -1319,6 +1321,10 @@
 <script>
 const $ = id => document.getElementById(id);
 
+// Versión visible para verificar en Bluefy que se cargó la build correcta.
+// Actualiza este valor cada vez que hagas cambios importantes.
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-A';
+
 const CZ_SERVICE_UUID = '00008ff8-0000-1000-8000-00805f9b34fb';
 const UUID_CZ_SENSOR_DATA = '00008fea-0000-1000-8000-00805f9b34fb';
 const UUID_CZ_SENSOR_AGGR = '00008fe9-0000-1000-8000-00805f9b34fb';
@@ -1559,8 +1565,9 @@ function decodeDescriptionText(dataView) {
 }
 
 function getTargetZoneCount() {
-  if (IOS_FIXED_UI_MODE) return IOS_FIXED_ZONE_COUNT;
-  return Math.max(1, czServices.length);
+  // Este dispositivo siempre tiene 2 cooking zones. Forzamos mínimo 2 tiles
+  // desde el inicio para que ambas ventanas de texto estén siempre presentes.
+  return Math.max(2, czServices.length);
 }
 
 async function getCharacteristicListForService(service, uuid) {
@@ -1924,7 +1931,7 @@ function renderCooktopZones() {
   syncZoneUiState();
   const summaryHost = $('cooktopSummary');
   const host = $('cooktopZones');
-  const detectedZones = czServices.length;
+  const detectedZones = zoneUiState.length; // siempre ≥ 2 (getTargetZoneCount)
 
   if (summaryHost) {
     if (detectedZones > 0) {
@@ -3403,6 +3410,20 @@ async function connectCookingZoneFlow() {
       ...actualCtrlCharsByZone, ...czControlCharsByZone, ...cookingStepStatusCharsByZone
     ].filter(Boolean).length;
     log(`─── Setup complete: ${czServices.length} zone(s) | ${nSubs} char(s) bound ───`);
+
+    // Diagnóstico VISIBLE en pantalla: cuántos servicios/chars por zona detectamos.
+    const diag = $('discoveryDiag');
+    if (diag) {
+      const cz1_2c2b = actualCtrlCharsByZone[0] ? '✓' : '✗';
+      const cz2_2c2b = actualCtrlCharsByZone[1] ? '✓' : '✗';
+      const cz1_sens = (sensorCharsByZone[0] || []).length;
+      const cz2_sens = (sensorCharsByZone[1] || []).length;
+      diag.style.display = 'block';
+      diag.innerHTML =
+        `Servicios CZ: <b>${czServices.length}</b> · ` +
+        `CZ1[2C2B:${cz1_2c2b} sens:${cz1_sens}] · ` +
+        `CZ2[2C2B:${cz2_2c2b} sens:${cz2_sens}]`;
+    }
 
     // iOS/Bluefy: las notificaciones no siempre se activan → poll de todas las zonas.
     // También sirve de respaldo en cualquier plataforma para mantener ambas CZ pobladas.
@@ -5098,6 +5119,12 @@ setQuickModeButtonActive('');
 rbClearEditor();
 rbRenderSteps();
 renderCooktopZones();
+
+// Mostrar versión en el badge y en el título de la pestaña para verificar en Bluefy.
+const versionBadge = $('versionBadge');
+if (versionBadge) versionBadge.textContent = APP_VERSION;
+document.title = `UC3.2 ${APP_VERSION}`;
+log(`App version: ${APP_VERSION}`);
 
 if (!navigator.bluetooth) {
   $('nobtWarn').style.display = 'block';
