@@ -664,10 +664,10 @@
     .cookware-icon {
       position: absolute;
       left: 50%;
-      top: 50%;
+      top: 54%;
       transform: translate(-50%, -50%);
-      width: 112px;
-      height: 112px;
+      width: 46%;
+      height: 46%;
       border-radius: 999px;
       border: 2px solid #e5e7eb;
       background: radial-gradient(circle at 35% 35%, #dbe3ed 0%, #9aa7b8 45%, #5e6a79 100%);
@@ -682,8 +682,8 @@
       left: 50%;
       top: 50%;
       transform: translate(-50%, -50%);
-      width: 66px;
-      height: 66px;
+      width: 58%;
+      height: 58%;
       border-radius: 999px;
       border: 1.5px solid #f8fafccc;
       background: #ffffff12;
@@ -693,11 +693,11 @@
     .cookware-icon::before {
       content: '';
       position: absolute;
-      right: -24px;
+      right: -18%;
       top: 50%;
       transform: translateY(-50%);
-      width: 25px;
-      height: 14px;
+      width: 20%;
+      height: 12%;
       border-radius: 0 6px 6px 0;
       background: #e2e8f0;
       box-shadow: 0 0 3px #00000033;
@@ -964,8 +964,8 @@
 <div class="card">
   <div class="card-title">🔗 Connect your Cooking Appliance</div>
   <div class="row" style="margin-bottom:8px">
-    <button id="scanConnectBtn" class="btn btn-primary">Connect your Cooking Appliance</button>
-    <button id="disconnectBtn" class="btn btn-danger">Disconnect</button>
+    <button id="scanConnectBtn" class="btn btn-primary" style="padding:14px 20px;font-size:15px;flex:1;">Connect your Cooking Appliance</button>
+    <button id="disconnectBtn" class="btn btn-danger" style="padding:14px 20px;font-size:15px;flex:1;">Disconnect</button>
     <button id="forceDiscoverBtn" class="btn btn-outline" disabled title="Re-discover all characteristics without disconnecting">🔄 Re-discover</button>
   </div>
   <div class="row" style="margin-bottom:8px">
@@ -1064,13 +1064,12 @@
 
 <div class="card">
   <div class="card-title">
-    🔍 Query &amp; Transfer
+    🧩 Transfer (FTS, OTA)
   </div>
   <div id="advancedPanel">
     <div class="row" style="margin-bottom:8px; gap:8px;">
       <button id="openFtsModalBtn" class="btn" type="button" style="background:#1d4ed8; border-color:#1e40af; color:#fff;">🧩 FTS Console</button>
     </div>
-    <div id="advancedStatus" class="status-chip" style="margin:0">—</div>
   </div>
 </div>
 
@@ -1322,7 +1321,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-K';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-O';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -5244,6 +5243,12 @@ const versionBadge = $('versionBadge');
 if (versionBadge) versionBadge.textContent = APP_VERSION;
 document.title = `UC3.2 ${APP_VERSION}`;
 log(`App version: ${APP_VERSION}`);
+
+// En iOS/Bluefy solo hay UNA cooking zone, así que "Swap CZ1↔CZ2" no hace nada → se oculta.
+if (IOS_FIXED_UI_MODE) {
+  const swapBtn = $('swapZonesBtn');
+  if (swapBtn) swapBtn.style.display = 'none';
+}
 
 if (!navigator.bluetooth) {
   $('nobtWarn').style.display = 'block';
