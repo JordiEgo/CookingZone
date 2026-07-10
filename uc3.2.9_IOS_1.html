@@ -1507,7 +1507,7 @@ function stopDiscoveryCountdown(message = '', autoHideMs = 1600) {
   }
 }
 
-function startDiscoveryCountdown(totalSeconds = 45, label = 'Discovery in progress') {
+function startDiscoveryCountdown(totalSeconds = 55, label = 'Discovery in progress') {
   stopDiscoveryCountdown('', 0);
   const el = $('discoveryCountdown');
   if (!el) return;
@@ -3562,7 +3562,7 @@ async function connectCookingZoneFlow() {
   connectFlowBusy = true;
   $('scanConnectBtn').disabled = true;
   $('scanConnectBtn').textContent = '⏳ Scanning & connecting…';
-  if (IOS_FIXED_UI_MODE) startDiscoveryCountdown(45, 'iOS discovery');
+  if (IOS_FIXED_UI_MODE) startDiscoveryCountdown(55, 'iOS discovery');
   try {
     applianceDevice = await navigator.bluetooth.requestDevice({
       filters: [
@@ -3736,7 +3736,7 @@ async function forceRediscoverCharacteristics() {
   const btn = $('forceDiscoverBtn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Discovering…'; }
   connectFlowBusy = true;
-  if (IOS_FIXED_UI_MODE) startDiscoveryCountdown(45, 'iOS re-discovery');
+  if (IOS_FIXED_UI_MODE) startDiscoveryCountdown(55, 'iOS re-discovery');
   try {
     log('Force re-discover: re-reading services and characteristics…');
     let rdFound = [];
