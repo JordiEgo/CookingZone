@@ -3130,15 +3130,22 @@ async function connectCookingZoneFlow() {
     setConnected(true, applianceDevice.name || 'EGO appliance');
     log('Appliance GATT connected');
 
-    const found = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
+    // getPrimaryServices() (plural) puede lanzar excepción en iOS/Bluefy en lugar de devolver []
+    // Si lanza, el fallback al singular siempre se ejecuta
+    let found = [];
+    try {
+      found = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
+    } catch (e) {
+      log(`getPrimaryServices failed (${e.message}) — trying getPrimaryService…`, true);
+    }
     czServices = found.length ? found : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
     activeZoneIdx = 0;
     syncZoneUiState();
-    log(`Initial zone mapping: ${uiToServiceMap.map((svc, ui) => `UI CZ${ui + 1}->SVC${svc + 1}`).join(', ')}`);
+    log(`Found ${czServices.length} CZ service(s). Zone mapping: ${uiToServiceMap.map((svc, ui) => `UI CZ${ui + 1}->SVC${svc + 1}`).join(', ')}`);
     renderZones();
 
-    // Each step is isolated — one failure does not block the rest (important for iOS/Bluefy)
-    const steps = [
+    // Cada paso aislado — un fallo no bloquea los siguientes (crítico para iOS/Bluefy)
+    const setupSteps = [
       ['bindAllSensorCharacteristics',          bindAllSensorCharacteristics],
       ['configureSensorTriggers',               configureSensorTriggersForAllZones],
       ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
@@ -3154,12 +3161,9 @@ async function connectCookingZoneFlow() {
       ['enableSensorNotifications',             enableSensorNotifications],
       ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
     ];
-    for (const [name, fn] of steps) {
-      try {
-        await fn();
-      } catch (stepErr) {
-        log(`Setup step [${name}] failed: ${stepErr.message}`, true);
-      }
+    for (const [name, fn] of setupSteps) {
+      try { await fn(); }
+      catch (stepErr) { log(`Setup step [${name}] failed: ${stepErr.message}`, true); }
     }
   } catch (e) {
     if (e.name === 'NotFoundError') {
@@ -3184,11 +3188,17 @@ async function forceRediscoverCharacteristics() {
   connectFlowBusy = true;
   try {
     log('Force re-discover: re-reading services and characteristics…');
-    const found = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
-    czServices = found.length ? found : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
+    let rdFound = [];
+    try {
+      rdFound = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
+    } catch (e) {
+      log(`getPrimaryServices failed (${e.message}) — trying getPrimaryService…`, true);
+    }
+    czServices = rdFound.length ? rdFound : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
+    log(`Re-discover: found ${czServices.length} CZ service(s)`);
     syncZoneUiState();
     renderZones();
-    const steps = [
+    const rdSteps = [
       ['bindAllSensorCharacteristics',          bindAllSensorCharacteristics],
       ['configureSensorTriggers',               configureSensorTriggersForAllZones],
       ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
@@ -3204,8 +3214,9 @@ async function forceRediscoverCharacteristics() {
       ['enableSensorNotifications',             enableSensorNotifications],
       ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
     ];
-    for (const [name, fn] of steps) {
-      try { await fn(); } catch (e) { log(`Re-discover step [${name}] failed: ${e.message}`, true); }
+    for (const [name, fn] of rdSteps) {
+      try { await fn(); }
+      catch (e) { log(`Re-discover step [${name}] failed: ${e.message}`, true); }
     }
     log('Force re-discover: done');
   } catch (e) {
