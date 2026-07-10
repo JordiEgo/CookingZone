@@ -1082,7 +1082,8 @@
     <button id="toggleLogBtn" class="btn btn-outline">▼ Show</button>
   </div>
   <div id="logPanel" style="display:none">
-    <div class="row" style="justify-content:flex-end; margin-bottom:8px">
+    <div class="row" style="justify-content:flex-end; margin-bottom:8px; gap:8px">
+      <button id="copyLogBtn" class="btn btn-outline">📋 Copy</button>
       <button class="btn btn-outline" onclick="$('logBox').textContent=''">Clear</button>
     </div>
     <div class="log" id="logBox">Ready.</div>
@@ -1323,7 +1324,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-D';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-F';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -1352,6 +1353,22 @@ const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-D';
         vb.textContent = `${APP_VERSION} · ERR`;
         vb.title = text;
       }
+    } catch (_) { /* noop */ }
+    // Banner rojo SIEMPRE visible en pantalla con el texto completo del error,
+    // imprescindible para depurar en iOS/Bluefy (sin consola de desarrollador).
+    try {
+      let banner = document.getElementById('fatalErrBanner');
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'fatalErrBanner';
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+          'background:#dc2626;color:#fff;font:600 13px/1.4 monospace;padding:8px 12px;' +
+          'white-space:pre-wrap;word-break:break-word;box-shadow:0 2px 6px rgba(0,0,0,.3);';
+        banner.addEventListener('click', () => { banner.style.display = 'none'; });
+        (document.body || document.documentElement).appendChild(banner);
+      }
+      banner.style.display = 'block';
+      banner.textContent = `⚠️ ${APP_VERSION} ERROR (toca para cerrar)\n${text}`;
     } catch (_) { /* noop */ }
     try {
       const box = document.getElementById('logBox');
