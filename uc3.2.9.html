@@ -975,7 +975,7 @@
     <span id="notifStatus" class="notif-badge">off</span>
   </div>
   <div id="discoveryDiag" style="font-size:11px;color:#6f6558;background:#f8f5ee;border:1px solid #e3dccb;border-radius:6px;padding:4px 8px;margin-bottom:8px;display:none;font-family:monospace;"></div>
-  <div class="zone-wrap">
+  <div id="zoneWrap" class="zone-wrap">
     <span class="zone-label">Active Cooking Zone</span>
     <div id="zoneButtons" class="zone-buttons" role="radiogroup" aria-label="Active Cooking Zone"></div>
     <button id="swapZonesBtn" class="btn btn-outline" type="button">Swap CZ1↔CZ2</button>
@@ -1321,7 +1321,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-S';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-T';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -2142,7 +2142,7 @@ function renderCooktopZones() {
       <div class="cz-summary-tile active" style="margin-top:8px;cursor:default;">
         <div class="cz-summary-title" style="font-size:15px;">CZ ${i + 1} <span style="font-size:0.7em;color:#475569;">${capabilityLabel}</span></div>
         <div class="cz-summary-line" style="font-size:17px;"><span class="cz-summary-key">Power</span><span class="cz-summary-val">${zone.power}</span></div>
-        <div class="cz-summary-line" style="font-size:17px;"><span class="cz-summary-key">Setpoint</span><span class="cz-summary-val">${zone.recipeTargetTemp}</span></div>
+        <div class="cz-summary-line" style="font-size:17px;"><span class="cz-summary-key">Actual Temp</span><span class="cz-summary-val">${zone.actualTemp || '—'}</span></div>
         <div class="cz-summary-line" style="font-size:17px;"><span class="cz-summary-key">Sensor Temp</span><span class="cz-summary-val">${zone.sensorTemp === '—' ? '—' : `${zone.sensorTemp} °C`}</span></div>
         <div class="cz-summary-line" style="font-size:17px;"><span class="cz-summary-key">Cookware Temp</span><span class="cz-summary-val">${zone.cookwareTemp === '—' ? '—' : `${zone.cookwareTemp} °C`}</span></div>
       </div>
@@ -5316,6 +5316,10 @@ log(`App version: ${APP_VERSION}`);
 if (IOS_FIXED_UI_MODE) {
   const swapBtn = $('swapZonesBtn');
   if (swapBtn) swapBtn.style.display = 'none';
+  // Con una sola zona, el selector "Active Cooking Zone" tampoco tiene sentido, y al
+  // pulsarlo dispara un re-bind + lecturas innecesarias. Se oculta completo.
+  const zw = $('zoneWrap');
+  if (zw) zw.style.display = 'none';
 }
 
 if (!navigator.bluetooth) {
