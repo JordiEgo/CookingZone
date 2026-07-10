@@ -1068,8 +1068,6 @@
   </div>
   <div id="advancedPanel">
     <div class="row" style="margin-bottom:8px; gap:8px;">
-      <button id="advancedQueryBtn" class="btn btn-outline" type="button">🔎 Query Active CZ</button>
-      <button id="readCzDescBtn" class="btn btn-outline" type="button">📝 Read CZ Descriptions</button>
       <button id="openFtsModalBtn" class="btn" type="button" style="background:#1d4ed8; border-color:#1e40af; color:#fff;">🧩 FTS Console</button>
     </div>
     <div id="advancedStatus" class="status-chip" style="margin:0">—</div>
@@ -1324,7 +1322,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-I';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-J';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -2101,14 +2099,14 @@ function renderCooktopZones() {
     const manualAdjustHtml = manualTempMode
       ? `
       <div class="cz-power-edit">
-        <div class="cz-power-row"><span>Temperature adjust</span><strong id="tmpVal-${i}">${tempCurrent.toFixed(1)}°C</strong></div>
+        <div class="cz-power-row" style="font-size:16px;font-weight:800;"><span>Temperature adjust</span><strong id="tmpVal-${i}">${tempCurrent.toFixed(1)}°C</strong></div>
         <input type="range" class="cz-temp-slider" data-zone="${i}" min="${tempMin.toFixed(1)}" max="${tempMax.toFixed(1)}" step="0.5" value="${tempCurrent.toFixed(1)}" style="--fill:${Math.max(0, Math.min(100, tempFillPct)).toFixed(1)}%" ${applianceGatt?.connected ? '' : 'disabled'} />
         <div class="cz-note">Target range ${tempMin.toFixed(1)}°C - ${tempMax.toFixed(1)}°C</div>
       </div>
       `
       : `
       <div class="cz-power-edit">
-        <div class="cz-power-row"><span>Power adjust</span><strong id="pwrVal-${i}">${powerPct.toFixed(1)}%</strong></div>
+        <div class="cz-power-row" style="font-size:16px;font-weight:800;"><span>Power adjust</span><strong id="pwrVal-${i}">${powerPct.toFixed(1)}%</strong></div>
         <input type="range" class="cz-power-slider" data-zone="${i}" min="0" max="100" step="0.5" value="${powerPct.toFixed(1)}" style="--fill:${powerPct.toFixed(1)}%" ${applianceGatt?.connected ? '' : 'disabled'} />
       </div>
       `;
@@ -2157,9 +2155,9 @@ function renderCooktopZones() {
           <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Recipe Target</span>
           <button class="btn btn-outline cz-live-toggle" style="padding:2px 8px;font-size:11px;">${czLiveDetailsVisible ? '▲ Hide' : '▼ Details'}</button>
         </div>
-        <div style="font-size:13px;font-weight:700;color:#4f463c;">State: <strong style="color:${recipeStateColor}">${recipeStateLabel}</strong></div>
-        <div style="font-size:13px;font-weight:700;color:#4f463c;">Setpoint: ${zone.recipeTargetTemp} &nbsp;·&nbsp; Step: ${zone.recipeStepIndex}</div>
-        <div style="font-size:13px;font-weight:700;color:#4f463c;">Process: ${recipeProcessDisplay}</div>
+        <div style="font-size:16px;font-weight:800;color:#4f463c;">State: <strong style="color:${recipeStateColor}">${recipeStateLabel}</strong></div>
+        <div style="font-size:16px;font-weight:800;color:#4f463c;">Setpoint: ${zone.recipeTargetTemp} &nbsp;·&nbsp; Step: ${zone.recipeStepIndex}</div>
+        <div style="font-size:16px;font-weight:800;color:#4f463c;">Process: ${recipeProcessDisplay}</div>
       </div>
       <div class="cz-live-details" style="display:${czLiveDetailsVisible ? '' : 'none'}">
         <div class="cz-section-live">Live · Actual Conditions (Setpoints · 2C2B)</div>
@@ -4946,23 +4944,6 @@ $('disassociateBtn').addEventListener('click', () => writeCzControl(0x01));
 $('abortBtn').addEventListener('click', () => writeCzControl(0x02));
 
 // Recipe panel is always visible (no toggle button)
-
-$('advancedQueryBtn').addEventListener('click', runAdvancedQuery);
-
-$('readCzDescBtn').addEventListener('click', async () => {
-  if (!applianceGatt?.connected) {
-    log('Read CZ Descriptions: connect appliance first', true);
-    return;
-  }
-  await primeZoneDescriptions();
-  syncZoneUiState();
-  zoneUiState.forEach((z, i) => {
-    if (z.descriptionReady) {
-      log(`CZ${i + 1} description text: "${z.descriptionText || '(empty)'}"`);
-      log(`CZ${i + 1} description hex:  ${z.descriptionHex || '(empty)'}`);
-    }
-  });
-});
 
 function openFtsModal() {
   $('ftsOverlay').style.display = 'block';
