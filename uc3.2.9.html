@@ -1325,6 +1325,16 @@ const $ = id => document.getElementById(id);
 // Actualiza este valor cada vez que hagas cambios importantes.
 const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-B';
 
+// Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
+// código que pudiera lanzar un error y dejar el badge en "v?".
+(function showAppVersion() {
+  try {
+    const vb = document.getElementById('versionBadge');
+    if (vb) vb.textContent = APP_VERSION;
+    document.title = `UC3.2 ${APP_VERSION}`;
+  } catch (_) { /* noop */ }
+})();
+
 const CZ_SERVICE_UUID = '00008ff8-0000-1000-8000-00805f9b34fb';
 const UUID_CZ_SENSOR_DATA = '00008fea-0000-1000-8000-00805f9b34fb';
 const UUID_CZ_SENSOR_AGGR = '00008fe9-0000-1000-8000-00805f9b34fb';
