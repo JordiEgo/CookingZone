@@ -3130,23 +3130,32 @@ async function connectCookingZoneFlow() {
     setConnected(true, applianceDevice.name || 'EGO appliance');
     log('Appliance GATT connected');
 
-    // 3-tier service discovery para compatibilidad iOS/Bluefy:
-    //   1. getPrimaryServices(UUID)  → estándar, devuelve todas las instancias con ese UUID
-    //   2. getPrimaryServices() all  → devuelve todos los servicios, filtramos por UUID (iOS fallback multi-zona)
-    //   3. getPrimaryService(UUID)   → singular, solo la primera instancia (fallback mínimo)
+    // iOS/Bluefy: getPrimaryServices(UUID) puede fallar si se llama justo tras gatt.connect()
+    // porque el stack interno aún no terminó el service discovery.
+    // Estrategia: 2 intentos con delay creciente → fallback a getPrimaryServices() sin UUID + filter → singular
     let found = [];
-    try {
-      found = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
-      log(`getPrimaryServices(UUID) ok — ${found.length} service(s)`);
-    } catch (e1) {
-      log(`getPrimaryServices(UUID) failed (${e1.message}) — trying getPrimaryServices() all…`, true);
+    for (const waitMs of [0, 400, 900]) {
+      if (found.length) break;
+      if (waitMs > 0) {
+        log(`getPrimaryServices(UUID) retry after ${waitMs}ms…`);
+        await delay(waitMs);
+      }
+      try {
+        found = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
+        log(`getPrimaryServices(UUID) ok — ${found.length} service(s)`);
+      } catch (e) {
+        log(`getPrimaryServices(UUID) attempt (wait=${waitMs}ms) failed: ${e.message}`, true);
+      }
+    }
+    if (!found.length) {
+      // Fallback: obtener todos los servicios y filtrar por UUID
+      // Nota: iOS Core Bluetooth puede devolver solo una instancia por UUID en este modo
       try {
         const all = await applianceGatt.getPrimaryServices();
         found = all.filter(s => s.uuid === CZ_SERVICE_UUID);
-        if (found.length) log(`getPrimaryServices() all — found ${found.length} CZ service(s) after filter`);
-        else log('getPrimaryServices() all — 0 CZ services after filter, falling back to singular', true);
+        log(`getPrimaryServices() all→filter: ${found.length} CZ service(s)`);
       } catch (e2) {
-        log(`getPrimaryServices() all failed (${e2.message}) — falling back to singular`, true);
+        log(`getPrimaryServices() all failed (${e2.message}) — using singular`, true);
       }
     }
     czServices = found.length ? found : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
@@ -3200,17 +3209,23 @@ async function forceRediscoverCharacteristics() {
   try {
     log('Force re-discover: re-reading services and characteristics…');
     let rdFound = [];
-    try {
-      rdFound = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
-      log(`Re-discover: getPrimaryServices(UUID) ok — ${rdFound.length} service(s)`);
-    } catch (e1) {
-      log(`Re-discover: getPrimaryServices(UUID) failed (${e1.message}) — trying all…`, true);
+    for (const waitMs of [0, 400, 900]) {
+      if (rdFound.length) break;
+      if (waitMs > 0) { log(`Re-discover: retry after ${waitMs}ms…`); await delay(waitMs); }
+      try {
+        rdFound = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
+        log(`Re-discover: getPrimaryServices(UUID) ok — ${rdFound.length} service(s)`);
+      } catch (e) {
+        log(`Re-discover: getPrimaryServices(UUID) wait=${waitMs}ms failed: ${e.message}`, true);
+      }
+    }
+    if (!rdFound.length) {
       try {
         const all = await applianceGatt.getPrimaryServices();
         rdFound = all.filter(s => s.uuid === CZ_SERVICE_UUID);
-        if (rdFound.length) log(`Re-discover: getPrimaryServices() all — ${rdFound.length} CZ service(s)`);
+        log(`Re-discover: getPrimaryServices() all→filter: ${rdFound.length} CZ service(s)`);
       } catch (e2) {
-        log(`Re-discover: getPrimaryServices() all failed (${e2.message}) — using singular`, true);
+        log(`Re-discover: getPrimaryServices() all failed (${e2.message})`, true);
       }
     }
     czServices = rdFound.length ? rdFound : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
