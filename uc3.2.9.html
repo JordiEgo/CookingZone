@@ -3337,38 +3337,43 @@ async function connectCookingZoneFlow() {
     setConnected(true, applianceDevice.name || 'EGO appliance');
     log('Appliance GATT connected');
 
-    // iOS/Bluefy: getPrimaryServices(UUID) puede fallar si se llama justo tras gatt.connect()
-    // porque el stack interno aún no terminó el service discovery.
-    // Estrategia: 2 intentos con delay creciente → fallback a getPrimaryServices() sin UUID + filter → singular
-    let found = [];
+    // El firmware expone DOS instancias del servicio 0x8FF8 (una por cooking zone).
+    // iOS/Bluefy: getPrimaryServices(UUID) suele devolver SOLO la primera instancia (zona 0).
+    // Por eso probamos AMBOS métodos y nos quedamos con el que devuelva MÁS instancias.
+    let byUuid = [];
+    let byAll = [];
     for (const waitMs of [0, 400, 900]) {
-      if (found.length) break;
-      if (waitMs > 0) {
-        log(`getPrimaryServices(UUID) retry after ${waitMs}ms…`);
-        await delay(waitMs);
-      }
+      if (byUuid.length >= 2) break;
+      if (waitMs > 0) { log(`Service discovery retry after ${waitMs}ms…`); await delay(waitMs); }
+      // Método 1: filtrado por UUID
       try {
-        found = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
-        log(`getPrimaryServices(UUID) ok — ${found.length} service(s)`);
+        const r = await applianceGatt.getPrimaryServices(CZ_SERVICE_UUID);
+        if (r.length > byUuid.length) byUuid = r;
       } catch (e) {
-        log(`getPrimaryServices(UUID) attempt (wait=${waitMs}ms) failed: ${e.message}`, true);
+        log(`getPrimaryServices(UUID) failed: ${e.message}`, true);
       }
-    }
-    if (!found.length) {
-      // Fallback: obtener todos los servicios y filtrar por UUID
-      // Nota: iOS Core Bluetooth puede devolver solo una instancia por UUID en este modo
+      // Método 2: TODOS los servicios y filtrar (puede revelar la 2ª instancia en iOS)
       try {
         const all = await applianceGatt.getPrimaryServices();
-        found = all.filter(s => s.uuid === CZ_SERVICE_UUID);
-        log(`getPrimaryServices() all→filter: ${found.length} CZ service(s)`);
+        const filtered = all.filter(s => s.uuid === CZ_SERVICE_UUID);
+        if (filtered.length > byAll.length) byAll = filtered;
       } catch (e2) {
-        log(`getPrimaryServices() all failed (${e2.message}) — using singular`, true);
+        log(`getPrimaryServices() all failed: ${e2.message}`, true);
       }
     }
-    czServices = found.length ? found : [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)];
+    log(`Discovery: byUuid=${byUuid.length}, byAll=${byAll.length} CZ service instance(s)`);
+    // Nos quedamos con el conjunto que tenga más instancias
+    let found = (byAll.length > byUuid.length) ? byAll : byUuid;
+    if (!found.length) {
+      try { found = [await applianceGatt.getPrimaryService(CZ_SERVICE_UUID)]; } catch (_) {}
+    }
+    czServices = found;
     activeZoneIdx = 0;
     syncZoneUiState();
-    log(`Found ${czServices.length} CZ service(s). Zone mapping: ${uiToServiceMap.map((svc, ui) => `UI CZ${ui + 1}->SVC${svc + 1}`).join(', ')}`);
+    log(`Using ${czServices.length} CZ service(s). Zone mapping: ${uiToServiceMap.map((svc, ui) => `UI CZ${ui + 1}->SVC${svc + 1}`).join(', ')}`);
+    if (czServices.length < 2) {
+      log('⚠️ Only 1 CZ service instance visible — zone 2 may rely on duplicated characteristics within the single service', true);
+    }
     renderZones();
 
     // Cada paso aislado — un fallo no bloquea los siguientes (crítico para iOS/Bluefy)
