@@ -964,8 +964,8 @@
 <div class="card">
   <div class="card-title">🔗 Connect your Cooking Appliance</div>
   <div class="row" style="margin-bottom:8px">
-    <button id="scanConnectBtn" class="btn btn-primary" style="padding:14px 20px;font-size:15px;flex:1;">Connect your Cooking Appliance</button>
-    <button id="disconnectBtn" class="btn btn-danger" style="padding:14px 20px;font-size:15px;flex:1;">Disconnect</button>
+    <button id="scanConnectBtn" class="btn btn-primary">Connect your Cooking Appliance</button>
+    <button id="disconnectBtn" class="btn btn-danger">Disconnect</button>
     <button id="forceDiscoverBtn" class="btn btn-outline" disabled title="Re-discover all characteristics without disconnecting">🔄 Re-discover</button>
   </div>
   <div class="row" style="margin-bottom:8px">
@@ -1321,7 +1321,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-O';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-P';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -2989,6 +2989,14 @@ async function primeZoneDescriptions() {
 
 async function primeZoneCapabilities() {
   syncZoneUiState();
+  // Las capabilities NUNCA cambian: si ya se leyeron para todas las zonas, no las
+  // volvemos a leer en reconexiones (menos tráfico BLE, solo lo necesario).
+  const alreadyRead = zoneUiState.length > 0 && zoneUiState.every(z => z && z.capabilitiesReady);
+  if (alreadyRead) {
+    log('Capabilities ya leídas — se omite re-lectura');
+    renderCooktopZones();
+    return;
+  }
   for (let i = 0; i < zoneUiState.length; i++) {
     if (!zoneUiState[i]) continue;
     zoneUiState[i].capabilitiesReady = false;
@@ -3516,7 +3524,6 @@ async function connectCookingZoneFlow() {
       ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
       ['bindAllCzControlChars',                 bindAllCzControlCharacteristics],
       ['bindAllCzCookingStepStatusChars',       bindAllCzCookingStepStatusCharacteristics],
-      ['primeZoneDescriptions',                 primeZoneDescriptions],
       ['primeZoneCapabilities',                 primeZoneCapabilities],
       ['enableActualCtrlIndications',           enableActualCtrlIndications],
       ['enableCzControlIndications',            enableCzControlIndications],
@@ -3622,7 +3629,6 @@ async function forceRediscoverCharacteristics() {
       ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
       ['bindAllCzControlChars',                 bindAllCzControlCharacteristics],
       ['bindAllCzCookingStepStatusChars',       bindAllCzCookingStepStatusCharacteristics],
-      ['primeZoneDescriptions',                 primeZoneDescriptions],
       ['primeZoneCapabilities',                 primeZoneCapabilities],
       ['enableActualCtrlIndications',           enableActualCtrlIndications],
       ['enableCzControlIndications',            enableCzControlIndications],
