@@ -1321,7 +1321,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-P';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-R';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -1450,6 +1450,12 @@ let sensorPollTimer = null;
 let allZonesPollTimer = null;
 let allZonesPollBusy = false;
 let allZonesPollCycle = 0;
+// Coalescing de escrituras del slider: guarda solo el ÚLTIMO valor pendiente por zona
+// y mantiene UNA sola escritura en curso, para no inundar el enlace (evita el lag).
+const desiredPowerPending = {};
+const desiredPowerBusy = {};
+const desiredTempPending = {};
+const desiredTempBusy = {};
 let associateAnimTimer = null;
 let actualCtrlCharsByZone = [];
 let actualCtrlHandlersByZone = [];
@@ -2198,12 +2204,16 @@ function renderCooktopZones() {
       const valueEl = $(`pwrVal-${zoneIdx}`);
       if (valueEl) valueEl.textContent = `${value.toFixed(1)}%`;
       if (zoneUiState[zoneIdx]) zoneUiState[zoneIdx].power = `${value.toFixed(1)}%`;
+      // Coalescer: guarda el último valor y envía uno cada vez (sin inundar el enlace).
+      queueDesiredPower(zoneIdx, value);
     });
 
     slider.addEventListener('change', async (e) => {
       const zoneIdx = parseInt(e.target.dataset.zone, 10);
       const value = parseFloat(e.target.value) || 0;
-      await writeDesiredPower(zoneIdx, value);
+      // Escritura final autoritativa al soltar (con re-render y log).
+      queueDesiredPower(zoneIdx, value);
+      await writeDesiredPower(zoneIdx, value, false);
     });
   });
 
@@ -2222,12 +2232,14 @@ function renderCooktopZones() {
         zoneUiState[zoneIdx].pendingTempSetpointC = value;
         zoneUiState[zoneIdx].pendingTempUntilMs = Date.now() + TEMP_SETPOINT_HOLDOFF_MS;
       }
+      queueDesiredTemperature(zoneIdx, value);
     });
 
     slider.addEventListener('change', async (e) => {
       const zoneIdx = parseInt(e.target.dataset.zone, 10);
       const value = parseFloat(e.target.value) || 0;
-      await writeDesiredTemperature(zoneIdx, value);
+      queueDesiredTemperature(zoneIdx, value);
+      await writeDesiredTemperature(zoneIdx, value, false);
     });
   });
 
@@ -2526,8 +2538,14 @@ function startAssociateAnimation(zoneHuman) {
   }, 320);
 }
 
-async function writeCharacteristicWithFallback(ch, payload) {
+async function writeCharacteristicWithFallback(ch, payload, preferNoResponse = false) {
   const p = ch.properties || {};
+  // Escritura SIN respuesta (no espera ACK) → mucho menor latencia. Se usa para el
+  // slider, donde importa la fluidez y una escritura perdida se corrige con la siguiente.
+  if (preferNoResponse && p.writeWithoutResponse) {
+    await ch.writeValueWithoutResponse(payload);
+    return;
+  }
   if (p.write) {
     await ch.writeValueWithResponse(payload);
     return;
@@ -3305,9 +3323,41 @@ async function readActualConditionsNow(zoneIdx = activeZoneIdx) {
   }
 }
 
-async function writeDesiredPower(zoneIdx, pct) {
+// Encola una escritura de potencia coalescida: solo se envía el último valor y nunca
+// hay más de una escritura en curso por zona (fluido y sin saturar el enlace BLE).
+async function queueDesiredPower(zoneIdx, value) {
+  desiredPowerPending[zoneIdx] = value;
+  if (desiredPowerBusy[zoneIdx]) return;
+  desiredPowerBusy[zoneIdx] = true;
+  try {
+    while (desiredPowerPending[zoneIdx] !== undefined) {
+      const v = desiredPowerPending[zoneIdx];
+      desiredPowerPending[zoneIdx] = undefined;
+      await writeDesiredPower(zoneIdx, v, true);
+    }
+  } finally {
+    desiredPowerBusy[zoneIdx] = false;
+  }
+}
+
+async function queueDesiredTemperature(zoneIdx, value) {
+  desiredTempPending[zoneIdx] = value;
+  if (desiredTempBusy[zoneIdx]) return;
+  desiredTempBusy[zoneIdx] = true;
+  try {
+    while (desiredTempPending[zoneIdx] !== undefined) {
+      const v = desiredTempPending[zoneIdx];
+      desiredTempPending[zoneIdx] = undefined;
+      await writeDesiredTemperature(zoneIdx, v, true);
+    }
+  } finally {
+    desiredTempBusy[zoneIdx] = false;
+  }
+}
+
+async function writeDesiredPower(zoneIdx, pct, fast = false) {
   if (!applianceGatt?.connected) {
-    log('Cannot set power: appliance disconnected', true);
+    if (!fast) log('Cannot set power: appliance disconnected', true);
     return;
   }
 
@@ -3326,27 +3376,30 @@ async function writeDesiredPower(zoneIdx, pct) {
       (powerX10 >> 8) & 0xFF,
     ]);
 
-    await writeCharacteristicWithFallback(ch, payload);
+    // Coalescing (queueDesiredPower) garantiza una sola escritura en curso, así que
+    // usamos escritura CON respuesta (fiable) sin riesgo de saturar el enlace.
+    await writeCharacteristicWithFallback(ch, payload, false);
 
+    if (fast) return;
     syncZoneUiState();
     if (zoneUiState[zoneIdx]) zoneUiState[zoneIdx].power = `${(powerX10 / 10).toFixed(1)}%`;
     renderCooktopZones();
     log(`CZ${zoneIdx + 1}: desired power set to ${(powerX10 / 10).toFixed(1)}%`);
   } catch (e) {
-    log(`CZ${zoneIdx + 1}: set power failed (${e.message})`, true);
+    if (!fast) log(`CZ${zoneIdx + 1}: set power failed (${e.message})`, true);
   }
 }
 
-async function writeDesiredTemperature(zoneIdx, tempC) {
+async function writeDesiredTemperature(zoneIdx, tempC, fast = false) {
   if (!applianceGatt?.connected) {
-    log('Cannot set temperature: appliance disconnected', true);
+    if (!fast) log('Cannot set temperature: appliance disconnected', true);
     return;
   }
 
   syncZoneUiState();
   const zone = zoneUiState[zoneIdx];
   if (!zone?.cookwareAssociated || !zone?.supportsTempControl) {
-    log(`CZ${zoneIdx + 1}: temperature adjust not available (requires cookware + temp capability)`, true);
+    if (!fast) log(`CZ${zoneIdx + 1}: temperature adjust not available (requires cookware + temp capability)`, true);
     return;
   }
 
@@ -3370,8 +3423,9 @@ async function writeDesiredTemperature(zoneIdx, tempC) {
       (tempU16 >> 8) & 0xFF,
     ]);
 
-    await writeCharacteristicWithFallback(ch, payload);
+    await writeCharacteristicWithFallback(ch, payload, false);
 
+    if (fast) return;
     if (zoneUiState[zoneIdx]) {
       zoneUiState[zoneIdx].actualTemp = `${clampedTemp.toFixed(1)} °C`;
       zoneUiState[zoneIdx].pendingTempSetpointC = clampedTemp;
@@ -3380,7 +3434,7 @@ async function writeDesiredTemperature(zoneIdx, tempC) {
     renderCooktopZones();
     log(`CZ${zoneIdx + 1}: desired temperature set to ${clampedTemp.toFixed(1)}C (payload=${bytesToHex(payload)})`);
   } catch (e) {
-    log(`CZ${zoneIdx + 1}: set temperature failed (${e.message})`, true);
+    if (!fast) log(`CZ${zoneIdx + 1}: set temperature failed (${e.message})`, true);
   }
 }
 
