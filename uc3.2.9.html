@@ -1324,7 +1324,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-F';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-G';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -1452,6 +1452,7 @@ let sensorNotifEnabled = false;
 let sensorPollTimer = null;
 let allZonesPollTimer = null;
 let allZonesPollBusy = false;
+let allZonesPollCycle = 0;
 let associateAnimTimer = null;
 let actualCtrlCharsByZone = [];
 let actualCtrlHandlersByZone = [];
@@ -2396,6 +2397,11 @@ async function pollAllZonesOnce() {
   let changed = false;
   try {
     syncZoneUiState();
+    // 2C2B (condiciones actuales) se lee en CADA ciclo → refleja rápido los cambios
+    // hechos en el display físico. 8FEC/2C28 cambian rara vez, así que se leen solo
+    // 1 de cada 4 ciclos para no saturar la conexión (sobre todo en iOS/Bluefy).
+    allZonesPollCycle = (allZonesPollCycle + 1) % 1000000;
+    const pollSlowChars = (allZonesPollCycle % 4 === 0);
     const zoneCount = zoneUiState.length;
     for (let z = 0; z < zoneCount; z++) {
       // Sensor internal temperature (8FEA) — SOLO si las notificaciones NO están
@@ -2438,7 +2444,7 @@ async function pollAllZonesOnce() {
 
       // Cooking Zone Control (8FEC)
       const ctrlCh = czControlCharsByZone[z];
-      if (ctrlCh) {
+      if (ctrlCh && pollSlowChars) {
         try {
           const dv = await ctrlCh.readValue();
           const parsed = parseCzControlPayload(dv);
@@ -2449,7 +2455,7 @@ async function pollAllZonesOnce() {
 
       // Cooking Step Status (2C28)
       const cssCh = cookingStepStatusCharsByZone[z];
-      if (cssCh) {
+      if (cssCh && pollSlowChars) {
         try {
           const dv = await cssCh.readValue();
           if (dv && dv.byteLength >= 5) {
@@ -3511,11 +3517,10 @@ async function connectCookingZoneFlow() {
       diag.innerHTML = diagHtml;
     }
 
-    // Poll de respaldo SOLO para estado/control (2C2B, 8FEC, 2C28), que no llegan
-    // por notificación. El sensor llega por notificación, así que el poll lo omite.
-    // En iOS/Bluefy usamos un intervalo lento (cada lectura es cara y serializada);
-    // en Android es aún más espaciado porque las notificaciones cubren casi todo.
-    startAllZonesPolling(IOS_FIXED_UI_MODE ? 5000 : 6000);
+    // Poll de respaldo (iOS/Bluefy no puede activar indicaciones de 2C2B/8FEC).
+    // 2C2B se lee cada ciclo (cambios del display físico se ven rápido); 8FEC/2C28
+    // solo 1 de cada 4 ciclos. Intervalo base bajo para que sea responsivo.
+    startAllZonesPolling(IOS_FIXED_UI_MODE ? 1500 : 2500);
 
     // Abrir log automáticamente para ver el diagnóstico
     const lp = $('logPanel');
