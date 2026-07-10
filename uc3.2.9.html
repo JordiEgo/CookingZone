@@ -3185,6 +3185,18 @@ async function connectCookingZoneFlow() {
       try { await fn(); }
       catch (stepErr) { log(`Setup step [${name}] failed: ${stepErr.message}`, true); }
     }
+
+    // Resumen de setup — siempre visible al terminar
+    const nSubs = [
+      ...actualCtrlCharsByZone, ...czControlCharsByZone, ...cookingStepStatusCharsByZone
+    ].filter(Boolean).length;
+    log(`─── Setup complete: ${czServices.length} zone(s) | ${nSubs} char(s) bound ───`);
+    // Abrir log automáticamente para ver el diagnóstico
+    const lp = $('logPanel');
+    if (lp.style.display === 'none') {
+      lp.style.display = 'block';
+      $('toggleLogBtn').textContent = '▲ Hide';
+    }
   } catch (e) {
     if (e.name === 'NotFoundError') {
       log('Device picker cancelled');
@@ -4838,6 +4850,19 @@ $('toggleLogBtn').addEventListener('click', () => {
   const open = p.style.display !== 'none';
   p.style.display = open ? 'none' : 'block';
   $('toggleLogBtn').textContent = open ? '▼ Show' : '▲ Hide';
+});
+
+$('copyLogBtn').addEventListener('click', () => {
+  const text = $('logBox').textContent || '';
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = $('copyLogBtn');
+      btn.textContent = '✓ Copied';
+      setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+    }).catch(() => prompt('Copy this log:', text));
+  } else {
+    prompt('Copy this log:', text);
+  }
 });
 
 $('stepPreviewHeader').addEventListener('click', () => {
