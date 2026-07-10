@@ -1322,7 +1322,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-J';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-K';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -2763,6 +2763,21 @@ async function configureSensorTriggersForAllZones() {
   }
 }
 
+// Pre-resolver la característica Desired Control (2C2A) durante la conexión, para que
+// la PRIMERA pulsación del slider de power/temperatura no pague el coste de descubrirla
+// (con reintentos de 300-700 ms, muy lento en iOS/Bluefy → primera acción con retardo).
+async function primeDesiredControlChars() {
+  try {
+    if (!desiredCtrlCharsByZone.length) {
+      desiredCtrlCharsByZone = await resolveSingleCharsByZone(UUID_CZ_DESIRED_CTRL);
+    }
+    const n = desiredCtrlCharsByZone.filter(Boolean).length;
+    log(`Desired Control (2C2A) pre-resuelto: ${n} char(s)`);
+  } catch (e) {
+    log(`Desired Control (2C2A) pre-resolución falló (${e.message})`, true);
+  }
+}
+
 async function primeAllInternalTemperatures() {
   if (!sensorCharsByZone.length) return;
 
@@ -3509,6 +3524,7 @@ async function connectCookingZoneFlow() {
       ['enableCookingStepStatusNotifications',  enableCookingStepStatusNotifications],
       ['primeAllActualConditionsOnce',          primeAllActualConditionsOnce],
       ['primeAllCzControlStatesOnce',           primeAllCzControlStatesOnce],
+      ['primeDesiredControlChars',              primeDesiredControlChars],
       ['enableSensorNotifications',             enableSensorNotifications],
       ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
     ];
@@ -3614,6 +3630,7 @@ async function forceRediscoverCharacteristics() {
       ['enableCookingStepStatusNotifications',  enableCookingStepStatusNotifications],
       ['primeAllActualConditionsOnce',          primeAllActualConditionsOnce],
       ['primeAllCzControlStatesOnce',           primeAllCzControlStatesOnce],
+      ['primeDesiredControlChars',              primeDesiredControlChars],
       ['enableSensorNotifications',             enableSensorNotifications],
       ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
     ];
