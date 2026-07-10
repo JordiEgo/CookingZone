@@ -1323,7 +1323,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-B';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-C';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -1333,6 +1333,44 @@ const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-B';
     if (vb) vb.textContent = APP_VERSION;
     document.title = `UC3.2 ${APP_VERSION}`;
   } catch (_) { /* noop */ }
+})();
+
+// Capturador global de errores: cualquier excepción no controlada (incluida la que
+// abortaba la inicialización y dejaba el badge en "v?") se muestra en el badge y,
+// si existe, en el log en pantalla. Imprescindible para depurar en Bluefy/iOS,
+// donde no hay consola de desarrollador accesible.
+(function installGlobalErrorTrap() {
+  function report(kind, msg, src, line, col) {
+    const where = src ? ` @ ${String(src).split('/').pop()}:${line || '?'}:${col || '?'}` : '';
+    const text = `[${kind}] ${msg}${where}`;
+    try {
+      const vb = document.getElementById('versionBadge');
+      if (vb) {
+        vb.style.background = '#fecaca';
+        vb.style.borderColor = '#dc2626';
+        vb.style.color = '#7f1d1d';
+        vb.textContent = `${APP_VERSION} · ERR`;
+        vb.title = text;
+      }
+    } catch (_) { /* noop */ }
+    try {
+      const box = document.getElementById('logBox');
+      if (box) {
+        const ts = new Date().toLocaleTimeString();
+        box.textContent += `[${ts}] [FATAL] ${text}\n`;
+      }
+      const lp = document.getElementById('logPanel');
+      const tb = document.getElementById('toggleLogBtn');
+      if (lp && lp.style.display === 'none') { lp.style.display = 'block'; if (tb) tb.textContent = '▲ Hide'; }
+    } catch (_) { /* noop */ }
+  }
+  window.addEventListener('error', (e) => {
+    report('JS-ERROR', e.message || String(e.error || 'unknown'), e.filename, e.lineno, e.colno);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    report('PROMISE', (r && (r.message || r.toString())) || 'unhandled rejection');
+  });
 })();
 
 const CZ_SERVICE_UUID = '00008ff8-0000-1000-8000-00805f9b34fb';
@@ -2343,27 +2381,31 @@ async function pollAllZonesOnce() {
     syncZoneUiState();
     const zoneCount = zoneUiState.length;
     for (let z = 0; z < zoneCount; z++) {
-      // Sensor internal temperature (8FEA) — pick first readable sensor of the zone
-      const sensorGroup = sensorCharsByZone[z] || [];
-      for (let s = 0; s < sensorGroup.length; s++) {
-        const ch = sensorGroup[s];
-        if (!ch) continue;
-        try {
-          const v = await ch.readValue();
-          const parsed = parseSensor1Temp(v);
-          if (parsed) {
-            const prev = zoneUiState[z]?.sensorTemp;
-            if (zoneUiState[z]) zoneUiState[z].sensorTemp = parsed.tempC;
-            if (prev !== parsed.tempC) changed = true;
-            if (z === activeZoneIdx && s === 0) {
-              const sensorVal = $('sensor1Val');
-              const sensorRaw = $('sensorRaw');
-              if (sensorVal) sensorVal.textContent = parsed.tempC + ' °C';
-              if (sensorRaw) sensorRaw.textContent = 'raw: ' + parsed.rawHex;
+      // Sensor internal temperature (8FEA) — SOLO si las notificaciones NO están
+      // activas. Si hay notificación, el sensor ya llega solo y re-leerlo aquí
+      // sólo genera tráfico redundante que ralentiza la conexión.
+      if (!sensorNotifEnabled) {
+        const sensorGroup = sensorCharsByZone[z] || [];
+        for (let s = 0; s < sensorGroup.length; s++) {
+          const ch = sensorGroup[s];
+          if (!ch) continue;
+          try {
+            const v = await ch.readValue();
+            const parsed = parseSensor1Temp(v);
+            if (parsed) {
+              const prev = zoneUiState[z]?.sensorTemp;
+              if (zoneUiState[z]) zoneUiState[z].sensorTemp = parsed.tempC;
+              if (prev !== parsed.tempC) changed = true;
+              if (z === activeZoneIdx && s === 0) {
+                const sensorVal = $('sensor1Val');
+                const sensorRaw = $('sensorRaw');
+                if (sensorVal) sensorVal.textContent = parsed.tempC + ' °C';
+                if (sensorRaw) sensorRaw.textContent = 'raw: ' + parsed.rawHex;
+              }
+              break; // one good sensor read per zone is enough for the tile
             }
-            break; // one good sensor read per zone is enough for the tile
-          }
-        } catch (_) { /* keep going */ }
+          } catch (_) { /* keep going */ }
+        }
       }
 
       // Actual cooking conditions (2C2B)
