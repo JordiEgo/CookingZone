@@ -1321,7 +1321,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-V';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-X';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -3568,24 +3568,24 @@ async function connectCookingZoneFlow() {
     }
     renderZones();
 
-    // Cada paso aislado — un fallo no bloquea los siguientes (crítico para iOS/Bluefy)
-    const setupSteps = [
+    // ── FASE 1: pasos ESENCIALES (rápidos) ────────────────────────────────
+    // Enlazar características, leer una vez las condiciones actuales y dejar listo
+    // el canal de escritura (2C2A). Con esto la pantalla ya tiene datos y el slider
+    // funciona. NO incluye activar indicaciones (eso es lento/falla en iOS y se hace
+    // en la fase 2, DESPUÉS de arrancar el poll, para no bloquear la UI).
+    const essentialSteps = [
       ['bindAllSensorCharacteristics',          bindAllSensorCharacteristics],
-      ['configureSensorTriggers',               configureSensorTriggersForAllZones],
       ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
       ['bindAllCzControlChars',                 bindAllCzControlCharacteristics],
       ['bindAllCzCookingStepStatusChars',       bindAllCzCookingStepStatusCharacteristics],
       ['primeZoneCapabilities',                 primeZoneCapabilities],
-      ['enableActualCtrlIndications',           enableActualCtrlIndications],
-      ['enableCzControlIndications',            enableCzControlIndications],
-      ['enableCookingStepStatusNotifications',  enableCookingStepStatusNotifications],
       ['primeAllActualConditionsOnce',          primeAllActualConditionsOnce],
       ['primeAllCzControlStatesOnce',           primeAllCzControlStatesOnce],
       ['primeDesiredControlChars',              primeDesiredControlChars],
-      ['enableSensorNotifications',             enableSensorNotifications],
       ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
+      ['enableSensorNotifications',             enableSensorNotifications],
     ];
-    for (const [name, fn] of setupSteps) {
+    for (const [name, fn] of essentialSteps) {
       try { await fn(); }
       catch (stepErr) { log(`Setup step [${name}] failed: ${stepErr.message}`, true); }
     }
@@ -3616,10 +3616,36 @@ async function connectCookingZoneFlow() {
       diag.innerHTML = diagHtml;
     }
 
-    // Poll de respaldo (iOS/Bluefy no puede activar indicaciones de 2C2B/8FEC).
-    // 2C2B se lee CADA ciclo (1 s en iOS) → los cambios de potencia hechos en el
-    // display físico se reflejan en el cliente en ~1 s. 8FEC/2C28 solo 1 de cada 4 ciclos.
+    // ── ARRANCAR EL POLL YA ───────────────────────────────────────────────
+    // Poll de respaldo (iOS/Bluefy no puede activar indicaciones de 2C2B). Se lee
+    // 2C2B cada 1 s → la pantalla se actualiza en ~1 s SIN necesidad de tocar el
+    // display físico. Se arranca ANTES de los pasos lentos de la fase 2.
     startAllZonesPolling(IOS_FIXED_UI_MODE ? 1000 : 2500);
+
+    // ── FASE 2: pasos LENTOS / opcionales (no bloquean la UI) ─────────────
+    // Solo activamos notificaciones que SÍ funcionan y que SÍ usamos:
+    //  · Cooking Step Status (2C28) → notify, funciona en iOS, se usa para la cuenta
+    //    atrás de receta.
+    // Las INDICACIONES de 2C2B (condiciones actuales) y 8FEC (control de zona) FALLAN
+    // en iOS/Bluefy y además NO se usan (leemos 2C2B por poll y 8FEC por lectura directa
+    // al asociar). Por eso en iOS NI SE INTENTAN — evita ruido y retrasos. En desktop/
+    // Android sí se intentan porque ahí las indicaciones funcionan.
+    const deferredSteps = [
+      ['configureSensorTriggers',               configureSensorTriggersForAllZones],
+      ['enableCookingStepStatusNotifications',  enableCookingStepStatusNotifications],
+    ];
+    if (!IOS_FIXED_UI_MODE) {
+      deferredSteps.push(
+        ['enableActualCtrlIndications',         enableActualCtrlIndications],
+        ['enableCzControlIndications',          enableCzControlIndications],
+      );
+    }
+    (async () => {
+      for (const [name, fn] of deferredSteps) {
+        try { await fn(); }
+        catch (stepErr) { log(`Setup step [${name}] failed: ${stepErr.message}`, true); }
+      }
+    })();
 
     // Abrir log automáticamente para ver el diagnóstico
     const lp = $('logPanel');
