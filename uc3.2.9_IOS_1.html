@@ -974,6 +974,7 @@
     <span class="notif-label">Notifications:</span>
     <span id="notifStatus" class="notif-badge">off</span>
   </div>
+  <div id="discoveryCountdown" style="font-size:11px;color:#854d0e;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:4px 8px;margin-bottom:8px;display:none;font-family:monospace;"></div>
   <div id="discoveryDiag" style="font-size:11px;color:#6f6558;background:#f8f5ee;border:1px solid #e3dccb;border-radius:6px;padding:4px 8px;margin-bottom:8px;display:none;font-family:monospace;"></div>
   <div id="zoneWrap" class="zone-wrap">
     <span class="zone-label">Active Cooking Zone</span>
@@ -1476,6 +1477,57 @@ let czRecipeTargetVisible = false;
 let ftsServiceCache = null;
 let ftsCharsCache = null;
 let lastSensorNotifLogMsByZone = [];
+let discoveryCountdownTimer = null;
+let discoveryCountdownHideTimer = null;
+
+function stopDiscoveryCountdown(message = '', autoHideMs = 1600) {
+  if (discoveryCountdownTimer) {
+    clearInterval(discoveryCountdownTimer);
+    discoveryCountdownTimer = null;
+  }
+  if (discoveryCountdownHideTimer) {
+    clearTimeout(discoveryCountdownHideTimer);
+    discoveryCountdownHideTimer = null;
+  }
+  const el = $('discoveryCountdown');
+  if (!el) return;
+  if (!message) {
+    el.style.display = 'none';
+    el.textContent = '';
+    return;
+  }
+  el.textContent = message;
+  el.style.display = 'block';
+  if (autoHideMs > 0) {
+    discoveryCountdownHideTimer = setTimeout(() => {
+      el.style.display = 'none';
+      el.textContent = '';
+      discoveryCountdownHideTimer = null;
+    }, autoHideMs);
+  }
+}
+
+function startDiscoveryCountdown(totalSeconds = 45, label = 'Discovery in progress') {
+  stopDiscoveryCountdown('', 0);
+  const el = $('discoveryCountdown');
+  if (!el) return;
+
+  let remaining = Math.max(1, Math.floor(totalSeconds));
+  const paint = () => {
+    const secText = String(remaining).padStart(2, '0');
+    el.textContent = `${label}... ${secText}s`;
+    el.style.display = 'block';
+  };
+
+  paint();
+  discoveryCountdownTimer = setInterval(() => {
+    if (remaining > 0) remaining -= 1;
+    paint();
+    if (remaining <= 0) {
+      el.textContent = `${label}... almost done`;
+    }
+  }, 1000);
+}
 
 async function getFtsCharsFromActiveConnection() {
   if (!applianceGatt?.connected) throw new Error('Appliance not connected');
@@ -3510,6 +3562,7 @@ async function connectCookingZoneFlow() {
   connectFlowBusy = true;
   $('scanConnectBtn').disabled = true;
   $('scanConnectBtn').textContent = '⏳ Scanning & connecting…';
+  if (IOS_FIXED_UI_MODE) startDiscoveryCountdown(45, 'iOS discovery');
   try {
     applianceDevice = await navigator.bluetooth.requestDevice({
       filters: [
@@ -3653,16 +3706,25 @@ async function connectCookingZoneFlow() {
       lp.style.display = 'block';
       $('toggleLogBtn').textContent = '▲ Hide';
     }
+
+    if (IOS_FIXED_UI_MODE) {
+      stopDiscoveryCountdown('iOS discovery completed', 1800);
+    } else {
+      stopDiscoveryCountdown('', 0);
+    }
   } catch (e) {
     if (e.name === 'NotFoundError') {
       log('Device picker cancelled');
+      if (IOS_FIXED_UI_MODE) stopDiscoveryCountdown('iOS discovery cancelled', 1500);
     } else {
       log(`Connect flow error: ${e.message}`, true);
+      if (IOS_FIXED_UI_MODE) stopDiscoveryCountdown('iOS discovery failed', 2000);
     }
   } finally {
     connectFlowBusy = false;
     refreshConnectButtonState();
     $('scanConnectBtn').textContent = 'Connect your Cooking Appliance';
+    if (!IOS_FIXED_UI_MODE) stopDiscoveryCountdown('', 0);
   }
 }
 
@@ -3674,6 +3736,7 @@ async function forceRediscoverCharacteristics() {
   const btn = $('forceDiscoverBtn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Discovering…'; }
   connectFlowBusy = true;
+  if (IOS_FIXED_UI_MODE) startDiscoveryCountdown(45, 'iOS re-discovery');
   try {
     log('Force re-discover: re-reading services and characteristics…');
     let rdFound = [];
@@ -3721,12 +3784,15 @@ async function forceRediscoverCharacteristics() {
       catch (e) { log(`Re-discover step [${name}] failed: ${e.message}`, true); }
     }
     log('Force re-discover: done');
+    if (IOS_FIXED_UI_MODE) stopDiscoveryCountdown('iOS re-discovery completed', 1800);
   } catch (e) {
     log(`Force re-discover error: ${e.message}`, true);
+    if (IOS_FIXED_UI_MODE) stopDiscoveryCountdown('iOS re-discovery failed', 2000);
   } finally {
     connectFlowBusy = false;
     if (btn) { btn.textContent = '🔄 Re-discover'; }
     refreshConnectButtonState();
+    if (!IOS_FIXED_UI_MODE) stopDiscoveryCountdown('', 0);
   }
 }
 
@@ -3763,6 +3829,7 @@ function onApplianceDisconnected() {
   setNotifStatus('off', false);
   renderZones();
   ftsConsole.onParentDisconnected();
+  stopDiscoveryCountdown('', 0);
   log('Appliance disconnected');
 }
 
