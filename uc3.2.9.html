@@ -1324,7 +1324,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-G';
+const APP_VERSION = 'v2.3.9-iosfix-2026-07-10-H';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -2007,7 +2007,9 @@ function renderCooktopZones() {
   const detectedZones = zoneUiState.length; // iOS/Bluefy: 1 · Android/desktop: ≥ 2
 
   if (summaryHost) {
-    if (detectedZones > 0) {
+    // Con UNA sola cooking zone (iOS/Bluefy) el resumen se integra dentro de la tile
+    // de CZ1 (más abajo), así que ocultamos el cuadro de resumen separado.
+    if (detectedZones > 1) {
       summaryHost.style.display = 'grid';
       summaryHost.innerHTML = '';
       for (let i = 0; i < detectedZones; i++) {
@@ -2114,6 +2116,33 @@ function renderCooktopZones() {
     const recipeProcessDisplay = Number.isFinite(recipeProcessNum)
       ? `${recipeProcessNum} (${PROC_NAMES[recipeProcessNum] ?? 'Unknown'})`
       : '—';
+    // Resumen integrado (solo cuando hay UNA cooking zone): muestra los valores clave
+    // que antes vivían en el cuadro de resumen separado, ahora dentro de la tile CZ1.
+    let capabilityLabel = '(READING...)';
+    if (zone.capabilitiesReady) {
+      capabilityLabel = zone.supportsPowerControl && zone.supportsTempControl
+        ? '(POWER + TEMP)'
+        : zone.supportsPowerControl
+          ? '(POWER)'
+          : zone.supportsTempControl
+            ? '(TEMP)'
+            : '(NONE)';
+    } else if (zone.capabilitiesError) {
+      capabilityLabel = '(CAP ERR)';
+    }
+    const integratedSummaryHtml = (detectedZones === 1)
+      ? `
+      <div class="cz-summary-tile active" style="margin-top:8px;cursor:default;">
+        <div class="cz-summary-title">CZ ${i + 1} <span style="font-size:0.75em;color:#475569;">${capabilityLabel}</span></div>
+        <div class="cz-summary-line"><span class="cz-summary-key">Power</span><span class="cz-summary-val">${zone.power}</span></div>
+        <div class="cz-summary-line"><span class="cz-summary-key">Setpoint</span><span class="cz-summary-val">${zone.recipeTargetTemp}</span></div>
+        <div class="cz-summary-line"><span class="cz-summary-key">Sensor Temp</span><span class="cz-summary-val">${zone.sensorTemp === '—' ? '—' : `${zone.sensorTemp} °C`}</span></div>
+        <div class="cz-summary-line"><span class="cz-summary-key">Cookware Temp</span><span class="cz-summary-val">${zone.cookwareTemp === '—' ? '—' : `${zone.cookwareTemp} °C`}</span></div>
+        <div class="cz-summary-line"><span class="cz-summary-key">8FEC State</span><span class="cz-summary-val">${zone.czControlStateLabel || '—'}</span></div>
+        <div class="cz-summary-line"><span class="cz-summary-key">Recipe</span><span class="cz-summary-val" style="color:${recipeStateColor}">${recipeStateLabel}</span></div>
+      </div>
+      `
+      : '';
     tile.innerHTML = `
       <div class="cz-title">CZ ${i + 1}</div>
       <div class="cz-burner${tempClass}">
@@ -2124,6 +2153,7 @@ function renderCooktopZones() {
         <span class="cwd-temp-badge${cwdBadgeClass}${cwdLiveClass}">${cwdBadgeText}</span>
         <span class="cz-power">P ${zone.power}</span>
       </div>
+      ${integratedSummaryHtml}
       <div style="margin-top:4px;display:flex;flex-direction:column;gap:2px;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Recipe Target</span>
