@@ -1322,7 +1322,7 @@ const $ = id => document.getElementById(id);
 
 // Versión visible para verificar en Bluefy que se cargó la build correcta.
 // Actualiza este valor cada vez que hagas cambios importantes.
-const APP_VERSION = 'v2.3.11-iosfix-2026-07-11-B';
+const APP_VERSION = 'v2.3.11-iosfix-2026-07-11-C';
 
 // Fijar la versión en el badge y título INMEDIATAMENTE, antes de cualquier otro
 // código que pudiera lanzar un error y dejar el badge en "v?".
@@ -1425,6 +1425,9 @@ const FORCE_REVERSED_ZONE_DETECTION = true;
 const IOS_FIXED_UI_MODE = /iPad|iPhone|iPod/i.test(navigator.userAgent || '');
 const CHAR_DISCOVERY_RETRY_MS = IOS_FIXED_UI_MODE ? [0, 120, 260] : [0, 260, 560];
 const SERVICE_DISCOVERY_RETRY_MS = IOS_FIXED_UI_MODE ? [0, 180, 420] : [0, 400, 900];
+// Tráfico opcional desactivado para pruebas de receta: evita lecturas no esenciales.
+const ENABLE_CZ_DESCRIPTION_READS = false;   // 8FEE
+const ENABLE_CZ_SENSOR_AGGREGATE = false;    // 8FE9
 // iOS/Bluefy colapsa el servicio y las características duplicadas (0x8FF8) a UNA sola
 // instancia, por lo que la 2ª cooking zone es inalcanzable vía Web Bluetooth.
 // En iOS mostramos solo las zonas realmente accesibles (1). En Android/desktop, 2.
@@ -2784,7 +2787,9 @@ async function bindAllSensorCharacteristics() {
   let totalAggregateBound = 0;
 
   const sensorGroups = await resolveMultiCharsByZone(UUID_CZ_SENSOR_DATA);
-  const aggregateGroups = await resolveMultiCharsByZone(UUID_CZ_SENSOR_AGGR);
+  const aggregateGroups = ENABLE_CZ_SENSOR_AGGREGATE
+    ? await resolveMultiCharsByZone(UUID_CZ_SENSOR_AGGR)
+    : [];
 
   for (let i = 0; i < sensorGroups.length; i++) {
     const chars = sensorGroups[i] || [];
@@ -2803,24 +2808,25 @@ async function bindAllSensorCharacteristics() {
 
     totalBound += sensorCharsByZone[i].length;
 
-    const aggregateChars = aggregateGroups[i] || [];
     sensorAggregateCharsByZone[i] = [];
     sensorAggregateHandlersByZone[i] = [];
-
-    aggregateChars.forEach((aggregateChar, aggIdx) => {
-      const aggregateHandler = (event) => {
-        if (!IOS_FIXED_UI_MODE) {
-          const rawHex = dataViewToHex(event.target.value);
-          log(`CZ${i + 1} sensor aggregate${aggIdx + 1}: notif -> ${rawHex}`);
-        }
-      };
-      aggregateChar.addEventListener('characteristicvaluechanged', aggregateHandler);
-      sensorAggregateCharsByZone[i].push(aggregateChar);
-      sensorAggregateHandlersByZone[i].push(aggregateHandler);
-      const pAgg = aggregateChar.properties || {};
-      totalAggregateBound += 1;
-      log(`CZ${i + 1}: sensorAggregate${aggIdx + 1} bound (notify=${!!pAgg.notify}, indicate=${!!pAgg.indicate}, read=${!!pAgg.read})`);
-    });
+    if (ENABLE_CZ_SENSOR_AGGREGATE) {
+      const aggregateChars = aggregateGroups[i] || [];
+      aggregateChars.forEach((aggregateChar, aggIdx) => {
+        const aggregateHandler = (event) => {
+          if (!IOS_FIXED_UI_MODE) {
+            const rawHex = dataViewToHex(event.target.value);
+            log(`CZ${i + 1} sensor aggregate${aggIdx + 1}: notif -> ${rawHex}`);
+          }
+        };
+        aggregateChar.addEventListener('characteristicvaluechanged', aggregateHandler);
+        sensorAggregateCharsByZone[i].push(aggregateChar);
+        sensorAggregateHandlersByZone[i].push(aggregateHandler);
+        const pAgg = aggregateChar.properties || {};
+        totalAggregateBound += 1;
+        log(`CZ${i + 1}: sensorAggregate${aggIdx + 1} bound (notify=${!!pAgg.notify}, indicate=${!!pAgg.indicate}, read=${!!pAgg.read})`);
+      });
+    }
   }
 
   if (!totalBound && !totalAggregateBound) {
@@ -3053,6 +3059,10 @@ async function primeAllCzControlStatesOnce() {
 }
 
 async function primeZoneDescriptions() {
+  if (!ENABLE_CZ_DESCRIPTION_READS) {
+    log('8FEE (Zone Description) disabled by config');
+    return;
+  }
   syncZoneUiState();
   const charsByZone = await resolveSingleCharsByZone(UUID_CZ_DESCRIPTION);
   for (let i = 0; i < zoneUiState.length; i++) {
@@ -3269,25 +3279,27 @@ async function enableSensorNotifications() {
       if (ok) enabled += 1;
     }
 
-    const aggregateGroup = sensorAggregateCharsByZone[i] || [];
-    for (let j = 0; j < aggregateGroup.length; j++) {
-      const aggregateChar = aggregateGroup[j];
-      if (!aggregateChar) continue;
-      total += 1;
-      let okAgg = false;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          await delay(120 * attempt);
-          await aggregateChar.startNotifications();
-          okAgg = true;
-          break;
-        } catch (e) {
-          if (attempt === 3) {
-            log(`CZ${i + 1} sensor aggregate${j + 1}: notification enable failed (${e.message})`, true);
+    if (ENABLE_CZ_SENSOR_AGGREGATE) {
+      const aggregateGroup = sensorAggregateCharsByZone[i] || [];
+      for (let j = 0; j < aggregateGroup.length; j++) {
+        const aggregateChar = aggregateGroup[j];
+        if (!aggregateChar) continue;
+        total += 1;
+        let okAgg = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await delay(120 * attempt);
+            await aggregateChar.startNotifications();
+            okAgg = true;
+            break;
+          } catch (e) {
+            if (attempt === 3) {
+              log(`CZ${i + 1} sensor aggregate${j + 1}: notification enable failed (${e.message})`, true);
+            }
           }
         }
+        if (okAgg) aggregateEnabled += 1;
       }
-      if (okAgg) aggregateEnabled += 1;
     }
   }
 
@@ -3320,10 +3332,12 @@ async function disableSensorNotifications() {
       try { await ch.stopNotifications(); } catch (_) {}
     }
   }
-  for (const group of sensorAggregateCharsByZone) {
-    for (const ch of (group || [])) {
-      if (!ch) continue;
-      try { await ch.stopNotifications(); } catch (_) {}
+  if (ENABLE_CZ_SENSOR_AGGREGATE) {
+    for (const group of sensorAggregateCharsByZone) {
+      for (const ch of (group || [])) {
+        if (!ch) continue;
+        try { await ch.stopNotifications(); } catch (_) {}
+      }
     }
   }
   sensorNotifEnabled = false;
