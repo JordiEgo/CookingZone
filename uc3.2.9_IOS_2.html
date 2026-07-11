@@ -2549,41 +2549,12 @@ async function pollAllZonesOnce() {
   let changed = false;
   try {
     syncZoneUiState();
-    // Poll MÍNIMO (como el cliente de referencia): SOLO se lee 2C2B (condiciones
-    // actuales: power+temp+humidity) una vez por ciclo. 8FEC (control de zona) y
-    // 2C28 (estado de paso de receta) NO se sondean: llegan por indicación/notificación
-    // o se leen puntualmente al asociar cazuela / arrancar receta. Así el enlace queda
-    // limpio, sin la ráfaga de lecturas que teníamos antes.
+    // Poll MÍNIMO: SOLO se lee 2C2B (condiciones actuales) una vez por ciclo.
+    // Se suprimen lecturas repetitivas de otras características (incluido sensor).
     allZonesPollCycle = (allZonesPollCycle + 1) % 1000000;
     const logThisCycle = (allZonesPollCycle % 5 === 0); // log de diagnóstico ~cada 5 lecturas
     const zoneCount = zoneUiState.length;
     for (let z = 0; z < zoneCount; z++) {
-      // Sensor interno (8FEA) — SOLO si las notificaciones NO están activas. En iOS/Bluefy
-      // las notificaciones de sensor sí funcionan, así que normalmente esto NO se lee.
-      if (!sensorNotifEnabled) {
-        const sensorGroup = sensorCharsByZone[z] || [];
-        for (let s = 0; s < sensorGroup.length; s++) {
-          const ch = sensorGroup[s];
-          if (!ch) continue;
-          try {
-            const v = await ch.readValue();
-            const parsed = parseSensor1Temp(v);
-            if (parsed) {
-              const prev = zoneUiState[z]?.sensorTemp;
-              if (zoneUiState[z]) zoneUiState[z].sensorTemp = parsed.tempC;
-              if (prev !== parsed.tempC) changed = true;
-              if (z === activeZoneIdx && s === 0) {
-                const sensorVal = $('sensor1Val');
-                const sensorRaw = $('sensorRaw');
-                if (sensorVal) sensorVal.textContent = parsed.tempC + ' °C';
-                if (sensorRaw) sensorRaw.textContent = 'raw: ' + parsed.rawHex;
-              }
-              break; // one good sensor read per zone is enough for the tile
-            }
-          } catch (_) { /* keep going */ }
-        }
-      }
-
       // Actual cooking conditions (2C2B) — ÚNICA lectura periódica.
       const actualCh = actualCtrlCharsByZone[z];
       if (actualCh) {
@@ -2735,46 +2706,10 @@ function stopSensorPolling() {
 }
 
 function startSensorPolling() {
-  if (isPollingWarmupActive()) {
-    if (!sensorPollingDeferred) {
-      const leftMs = Math.max(0, pollingWarmupUntilMs - Date.now());
-      log(`Sensor polling deferred during warm-up (${Math.ceil(leftMs / 1000)}s left)`);
-    }
-    sensorPollingDeferred = true;
-    return;
-  }
   stopSensorPolling();
-  sensorPollTimer = setInterval(async () => {
-    if (!applianceGatt?.connected) {
-      stopSensorPolling();
-      return;
-    }
-    try {
-      if (!sensorCharsByZone.length) return;
-      let changed = false;
-      for (let zoneIdx = 0; zoneIdx < sensorCharsByZone.length; zoneIdx++) {
-        const group = sensorCharsByZone[zoneIdx] || [];
-        const ch = group[0] || null;
-        if (!ch) continue;
-        const v = await ch.readValue();
-        const parsed = parseSensor1Temp(v);
-        if (!parsed) continue;
-        syncZoneUiState();
-        const prev = zoneUiState[zoneIdx]?.sensorTemp;
-        if (zoneUiState[zoneIdx]) zoneUiState[zoneIdx].sensorTemp = parsed.tempC;
-        if (prev !== parsed.tempC) changed = true;
-        if (zoneIdx === activeZoneIdx) {
-          const sensorVal = $('sensor1Val');
-          const sensorRaw = $('sensorRaw');
-          if (sensorVal) sensorVal.textContent = parsed.tempC + ' °C';
-          if (sensorRaw) sensorRaw.textContent = 'raw: ' + parsed.rawHex;
-        }
-      }
-      if (changed) renderCooktopZones();
-    } catch (_) {
-      // Keep polling; transient read failures are expected on some BLE stacks.
-    }
-  }, 1200);
+  sensorPollingDeferred = false;
+  // Disabled by design: avoid repetitive sensor reads. Keep sensor updates via
+  // notifications/manual reads and rely on 2C2B polling for live UI refresh.
 }
 
 function parseSensor1Temp(dataView) {
