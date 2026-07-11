@@ -1423,6 +1423,8 @@ const MSD_BLOCK_SIZE = 21;
 const SENSOR_TRIGGER_INTERVAL_UNITS = 40; // 40 * 100ms = 4s
 const FORCE_REVERSED_ZONE_DETECTION = true;
 const IOS_FIXED_UI_MODE = /iPad|iPhone|iPod/i.test(navigator.userAgent || '');
+const CHAR_DISCOVERY_RETRY_MS = IOS_FIXED_UI_MODE ? [0, 120, 260] : [0, 260, 560];
+const SERVICE_DISCOVERY_RETRY_MS = IOS_FIXED_UI_MODE ? [0, 180, 420] : [0, 400, 900];
 // iOS/Bluefy colapsa el servicio y las características duplicadas (0x8FF8) a UNA sola
 // instancia, por lo que la 2ª cooking zone es inalcanzable vía Web Bluetooth.
 // En iOS mostramos solo las zonas realmente accesibles (1). En Android/desktop, 2.
@@ -1703,12 +1705,25 @@ function getTargetZoneCount() {
   return Math.max(2, czServices.length);
 }
 
-async function getCharacteristicListForService(service, uuid) {
+async function getCharacteristicListForService(service, uuid, opts = {}) {
+  const { preferSingle = false } = opts;
   const shortUuid = (uuid.length >= 8) ? uuid.slice(4, 8).toUpperCase() : uuid;
   let chars = [];
+
+  // Ruta rápida para características únicas: evita pagar el coste de getCharacteristics()
+  // con reintentos cuando no necesitamos duplicados por zona.
+  if (preferSingle) {
+    try {
+      const single = await service.getCharacteristic(uuid);
+      if (single) chars = [single];
+    } catch (_) {
+      chars = [];
+    }
+  }
+
   // getCharacteristics() (plural) can throw on iOS/Bluefy if called too soon.
   // Retry with growing delay so all duplicate characteristics are returned.
-  for (const waitMs of [0, 300, 700]) {
+  for (const waitMs of CHAR_DISCOVERY_RETRY_MS) {
     if (chars.length) break;
     if (waitMs > 0) await delay(waitMs);
     try {
@@ -1717,7 +1732,7 @@ async function getCharacteristicListForService(service, uuid) {
       chars = [];
     }
   }
-  if (!chars || !chars.length) {
+  if ((!chars || !chars.length) && !preferSingle) {
     try {
       const single = await service.getCharacteristic(uuid);
       chars = single ? [single] : [];
@@ -1761,7 +1776,7 @@ async function resolveSingleCharsByZone(uuid) {
   if (!czServices.length) return out;
 
   if (czServices.length === 1 && zoneCount > 1) {
-    const chars = await getCharacteristicListForService(czServices[0], uuid);
+    const chars = await getCharacteristicListForService(czServices[0], uuid, { preferSingle: false });
     return splitCharacteristicListForZones(chars, zoneCount, false);
   }
 
@@ -1769,7 +1784,7 @@ async function resolveSingleCharsByZone(uuid) {
     const serviceIdx = getServiceIndexForUi(i);
     const svc = czServices[Math.min(serviceIdx, czServices.length - 1)] || czServices[0];
     if (!svc) continue;
-    const chars = await getCharacteristicListForService(svc, uuid);
+    const chars = await getCharacteristicListForService(svc, uuid, { preferSingle: true });
     out[i] = chars[0] || null;
   }
   return out;
@@ -3587,7 +3602,7 @@ async function connectCookingZoneFlow() {
     // Por eso probamos AMBOS métodos y nos quedamos con el que devuelva MÁS instancias.
     let byUuid = [];
     let byAll = [];
-    for (const waitMs of [0, 400, 900]) {
+    for (const waitMs of SERVICE_DISCOVERY_RETRY_MS) {
       if (byUuid.length >= 2) break;
       if (waitMs > 0) { log(`Service discovery retry after ${waitMs}ms…`); await delay(waitMs); }
       // Método 1: filtrado por UUID
@@ -3633,16 +3648,12 @@ async function connectCookingZoneFlow() {
     // funciona. NO incluye activar indicaciones (eso es lento/falla en iOS y se hace
     // en la fase 2, DESPUÉS de arrancar el poll, para no bloquear la UI).
     const essentialSteps = [
-      ['bindAllSensorCharacteristics',          bindAllSensorCharacteristics],
       ['bindAllActualControlChars',             bindAllActualControlCharacteristics],
       ['bindAllCzControlChars',                 bindAllCzControlCharacteristics],
       ['bindAllCzCookingStepStatusChars',       bindAllCzCookingStepStatusCharacteristics],
-      ['primeZoneCapabilities',                 primeZoneCapabilities],
       ['primeAllActualConditionsOnce',          primeAllActualConditionsOnce],
       ['primeAllCzControlStatesOnce',           primeAllCzControlStatesOnce],
       ['primeDesiredControlChars',              primeDesiredControlChars],
-      ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
-      ['enableSensorNotifications',             enableSensorNotifications],
     ];
     for (const [name, fn] of essentialSteps) {
       try { await fn(); }
@@ -3690,6 +3701,10 @@ async function connectCookingZoneFlow() {
     // al asociar). Por eso en iOS NI SE INTENTAN — evita ruido y retrasos. En desktop/
     // Android sí se intentan porque ahí las indicaciones funcionan.
     const deferredSteps = [
+      ['bindAllSensorCharacteristics',          bindAllSensorCharacteristics],
+      ['primeZoneCapabilities',                 primeZoneCapabilities],
+      ['primeAllInternalTemperatures',          primeAllInternalTemperatures],
+      ['enableSensorNotifications',             enableSensorNotifications],
       ['configureSensorTriggers',               configureSensorTriggersForAllZones],
       ['enableCookingStepStatusNotifications',  enableCookingStepStatusNotifications],
     ];
@@ -3746,7 +3761,7 @@ async function forceRediscoverCharacteristics() {
   try {
     log('Force re-discover: re-reading services and characteristics…');
     let rdFound = [];
-    for (const waitMs of [0, 400, 900]) {
+    for (const waitMs of SERVICE_DISCOVERY_RETRY_MS) {
       if (rdFound.length) break;
       if (waitMs > 0) { log(`Re-discover: retry after ${waitMs}ms…`); await delay(waitMs); }
       try {
