@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1361,6 +1362,8 @@ const ACTUAL_POWER_MIN_PCT = 0;
 const ACTUAL_POWER_MAX_PCT = 100;
 const FIXED_MAX_TARGET_TEMP_C = 260;
 const TEMP_SETPOINT_HOLDOFF_MS = 2500;
+const CWD_STALE_RECHECK_MS = 4500;
+const CZ_CONTROL_RECHECK_COOLDOWN_MS = 3000;
 
 let applianceDevice = null;
 let applianceGatt = null;
@@ -1376,6 +1379,7 @@ let associateAnimTimer = null;
 let actualCtrlCharsByZone = [];
 let actualCtrlHandlersByZone = [];
 let actualCtrlPollTimer = null;
+let czControlRefreshInFlightByZone = [];
 let czControlCharsByZone = [];
 let czControlHandlersByZone = [];
 let czControlWaitersByZone = [];
@@ -1417,6 +1421,8 @@ function createDefaultZoneState() {
     sensorTemp: '—',
     cookwareTemp: '—',
     cookwareAssociated: false,
+    lastCwdTempAtMs: 0,
+    lastCzControlRefreshAttemptMs: 0,
     actualFlags: null,
     actualTemp: '—',
     actualHumidity: '—',
@@ -1540,6 +1546,30 @@ function updateZoneRecipeTarget(zoneIdx, parsedRp) {
     : '—';
 }
 
+function applyRecipeStateFromStepStatus(zoneIdx, flags, stepIndex, remainingTime) {
+  syncZoneUiState();
+  const z = zoneUiState[zoneIdx];
+  if (!z) return;
+
+  z.recipeStepIndex = stepIndex > 0 ? String(stepIndex) : '—';
+
+  // Peripheral can still report stale 2C28 started bits after cookware loss.
+  // 8FEC=Disassociated has priority in UI state.
+  if (z.czControlStateByte === 0x01) {
+    z.recipeRunning = false;
+    z.recipeTargetTemp = '—';
+    z.recipeStepIndex = '—';
+    z.recipeProcessType = '—';
+    return;
+  }
+
+  if (stepIndex > 0 || remainingTime > 0) {
+    z.recipeRunning = true;
+  } else {
+    z.recipeRunning = false;
+  }
+}
+
 function decodeDescriptionText(dataView) {
   try {
     const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
@@ -1652,6 +1682,11 @@ function updateZoneFromCzControl(zoneIdx, parsed, source = 'read') {
   } else if (parsed.isAssociated === false) {
     z.cookwareAssociated = false;
     z.cookwareTemp = '—';
+    // When cookware is no longer associated, clear recipe/runtime targets that are no longer valid.
+    z.recipeRunning = false;
+    z.recipeTargetTemp = '—';
+    z.recipeStepIndex = '—';
+    z.recipeProcessType = '—';
   }
 
   const idForLog = parsed.cookwareIdHex || 'N/A';
@@ -1803,16 +1838,58 @@ function updateZoneFromActualConditions(zoneIdx, parsed) {
   }
   z.actualHumidity = Number.isFinite(parsed.humidity_pct) ? `${parsed.humidity_pct.toFixed(1)}%` : '—';
   z.actualBlower = Number.isFinite(parsed.blowerFanSpeed_pct) ? `${parsed.blowerFanSpeed_pct}%` : '—';
+  const hasCwdTemp = Number.isFinite(parsed.cwdTemperature_C);
   if (Number.isFinite(parsed.cwdTemperature_C)) {
-    // Keep cookware association unique across UI zones.
-    for (let i = 0; i < zoneUiState.length; i++) {
-      if (i === zoneIdx) continue;
-      zoneUiState[i].cookwareAssociated = false;
-      zoneUiState[i].cookwareTemp = '—';
-    }
+    // Keep per-zone cookware state independent. A temp update on one CZ must not clear another CZ.
     z.cookwareTemp = parsed.cwdTemperature_C.toFixed(1);
-    z.cookwareAssociated = true;
+    z.lastCwdTempAtMs = Date.now();
+    if (z.czControlStateByte === 0x00 || !z.czControlReady) {
+      z.cookwareAssociated = true;
+    }
+  } else if (z.czControlStateByte === 0x01) {
+    // If 8FEC already says disassociated and no CWD temp is present, clear stale cookware badge/value.
+    z.cookwareAssociated = false;
+    z.cookwareTemp = '—';
   }
+
+  return { hasCwdTemp };
+}
+
+async function refreshCzControlOnCwdLoss(zoneIdx, actualInfo) {
+  if (!actualInfo || actualInfo.hasCwdTemp) return;
+  syncZoneUiState();
+  const z = zoneUiState[zoneIdx];
+  if (!z?.cookwareAssociated) return;
+  if (czControlRefreshInFlightByZone[zoneIdx]) return;
+
+  czControlRefreshInFlightByZone[zoneIdx] = true;
+  try {
+    await readCzControlNow(zoneIdx);
+  } catch (_) {
+    // Best-effort refresh to speed up disassociation UI updates.
+  } finally {
+    czControlRefreshInFlightByZone[zoneIdx] = false;
+  }
+}
+
+function maybeRefreshCzControlFromSensorTick(zoneIdx) {
+  syncZoneUiState();
+  const z = zoneUiState[zoneIdx];
+  if (!z?.cookwareAssociated) return;
+  if (z.czControlStateByte === 0x01) return;
+  if (czControlRefreshInFlightByZone[zoneIdx]) return;
+
+  const nowMs = Date.now();
+  const lastCwdMs = Number.isFinite(z.lastCwdTempAtMs) ? z.lastCwdTempAtMs : 0;
+  const lastTryMs = Number.isFinite(z.lastCzControlRefreshAttemptMs) ? z.lastCzControlRefreshAttemptMs : 0;
+  const staleForMs = nowMs - lastCwdMs;
+  const cooldownMs = nowMs - lastTryMs;
+
+  if (staleForMs < CWD_STALE_RECHECK_MS) return;
+  if (cooldownMs < CZ_CONTROL_RECHECK_COOLDOWN_MS) return;
+
+  z.lastCzControlRefreshAttemptMs = nowMs;
+  refreshCzControlOnCwdLoss(zoneIdx, { hasCwdTemp: false });
 }
 
 function renderCooktopZones() {
@@ -2325,6 +2402,25 @@ function parseSensor1Temp(dataView) {
   return { tempC: (signed / 10).toFixed(1), rawHex: raw.toString(16).padStart(4, '0') };
 }
 
+function parseCookingStepStatusPayload(dataView) {
+  if (!dataView || dataView.byteLength < 5) return null;
+
+  // Some stacks prepend a one-byte opcode/status before the canonical payload.
+  const offsets = [];
+  if (dataView.byteLength >= 5) offsets.push(0);
+  if (dataView.byteLength >= 6) offsets.push(1);
+
+  const candidates = offsets.map((offset) => {
+    const flags = dataView.getUint8(offset);
+    const stepIndex = dataView.getUint16(offset + 1, true);
+    const remainingTime = dataView.getUint16(offset + 3, true);
+    return { offset, flags, stepIndex, remainingTime };
+  });
+
+  const preferred = candidates.find(c => c.stepIndex > 0) || candidates[0];
+  return preferred || null;
+}
+
 async function getActiveZoneService() {
   if (!applianceGatt) throw new Error('No active GATT connection');
   if (!czServices.length) throw new Error('No Cooking Zone services discovered');
@@ -2530,7 +2626,8 @@ async function bindAllActualControlCharacteristics() {
       actualCtrlCharsByZone[i] = ch;
       const handler = async (event) => {
         const parsed = parseActualCookingConditions(event.target.value, `CZ${i + 1}`);
-        updateZoneFromActualConditions(i, parsed);
+        const actualInfo = updateZoneFromActualConditions(i, parsed);
+        refreshCzControlOnCwdLoss(i, actualInfo);
         renderCooktopZones();
       };
       ch.addEventListener('characteristicvaluechanged', handler);
@@ -2592,18 +2689,17 @@ async function bindAllCzCookingStepStatusCharacteristics() {
       cookingStepStatusCharsByZone[i] = ch;
       const handler = (event) => {
         const dataView = event.target.value;
-        const flags = dataView.getUint8(0);
-        const stepIndex = dataView.getUint16(1, true);
-        const remainingTime = dataView.getUint16(3, true);
+        const parsed = parseCookingStepStatusPayload(dataView);
+        if (!parsed) {
+          log(`CZ${i + 1}: Step Status payload too short (${dataView?.byteLength || 0} bytes)`, true);
+          return;
+        }
+        const { flags, stepIndex, remainingTime } = parsed;
         const logMsg = `CZ${i + 1}: Step Status - flags=${flags}, step=${stepIndex}, remaining=${remainingTime}`;
         log(logMsg);
-        
-        // If remaining time is 0, recipe has completed
-        if (remainingTime === 0) {
-          log(`CZ${i + 1}: Recipe step completed (remaining_time = 0)`, false);
-          setZoneRecipeRunning(i, false);
-          renderCooktopZones();
-        }
+
+        applyRecipeStateFromStepStatus(i, flags, stepIndex, remainingTime);
+        renderCooktopZones();
       };
       ch.addEventListener('characteristicvaluechanged', handler);
       cookingStepStatusHandlersByZone[i] = handler;
@@ -2631,6 +2727,49 @@ async function primeAllCzControlStatesOnce() {
   }
 
   renderCooktopZones();
+}
+
+async function readZoneRecipeTargetNow(zoneIdx) {
+  try {
+    const serviceIdx = getServiceIndexForUi(zoneIdx);
+    const svc = czServices[Math.min(serviceIdx, czServices.length - 1)] || czServices[0];
+    if (!svc) return null;
+
+    const ch = await svc.getCharacteristic(UUID_CZ_RECIPE_PARAMS);
+    const dv = await ch.readValue();
+    const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    const parsed = parseRecipeParamsPayload(bytes);
+    if (!parsed) {
+      log(`CZ${zoneIdx + 1}: 2C27 read but payload parse failed`, true);
+      return null;
+    }
+
+    updateZoneRecipeTarget(zoneIdx, parsed);
+    log(`CZ${zoneIdx + 1}: setpoint restored from 2C27 (step=${parsed.stepIndex}, process=0x${parsed.processType.toString(16).padStart(2, '0').toUpperCase()})`);
+    return parsed;
+  } catch (e) {
+    log(`CZ${zoneIdx + 1}: 2C27 setpoint read failed (${e.message})`, true);
+    return null;
+  }
+}
+
+async function primeAssociatedZoneRecipeTargets() {
+  syncZoneUiState();
+  const zoneCount = Math.max(1, czServices.length);
+  let restored = 0;
+
+  for (let i = 0; i < zoneCount; i++) {
+    const z = zoneUiState[i];
+    if (!z?.cookwareAssociated) continue;
+    const parsed = await readZoneRecipeTargetNow(i);
+    if (parsed) restored += 1;
+  }
+
+  if (restored > 0) {
+    renderCooktopZones();
+  } else {
+    log('Reconnect: no associated cookware found for setpoint restore');
+  }
 }
 
 async function primeZoneDescriptions() {
@@ -2792,6 +2931,7 @@ function onSensorNotification(event, zoneIdx, sensorSlot = 1) {
 
   syncZoneUiState();
   if (zoneUiState[zoneIdx]) zoneUiState[zoneIdx].sensorTemp = v.tempC;
+  maybeRefreshCzControlFromSensorTick(zoneIdx);
   renderCooktopZones();
 
   if (zoneIdx === activeZoneIdx) {
@@ -2920,6 +3060,8 @@ async function selectActiveZone(zoneIdx) {
       if (applianceGatt?.connected) await enableSensorNotifications();
     }
     await readCzControlNow(activeZoneIdx);
+    await readActualConditionsNow(activeZoneIdx);
+    await readCookingStepStatusNow(activeZoneIdx);
     log(`Active zone changed to CZ${activeZoneIdx + 1}`);
   } catch (err) {
     log(`Zone switch error: ${err.message}`, true);
@@ -2948,7 +3090,26 @@ async function readActualConditionsNow(zoneIdx = activeZoneIdx) {
     if (!ch) return;
     const dv = await ch.readValue();
     const parsed = parseActualCookingConditions(dv, `CZ${zoneIdx + 1}`);
-    updateZoneFromActualConditions(zoneIdx, parsed);
+    const actualInfo = updateZoneFromActualConditions(zoneIdx, parsed);
+    refreshCzControlOnCwdLoss(zoneIdx, actualInfo);
+    renderCooktopZones();
+  } catch (_) {
+    // Keep existing UI values if read fails.
+  }
+}
+
+async function readCookingStepStatusNow(zoneIdx = activeZoneIdx) {
+  try {
+    if (!cookingStepStatusCharsByZone.length) await bindAllCzCookingStepStatusCharacteristics();
+    const ch = cookingStepStatusCharsByZone[Math.min(zoneIdx, cookingStepStatusCharsByZone.length - 1)] || cookingStepStatusCharsByZone[0];
+    if (!ch) return;
+    const dv = await ch.readValue();
+    const parsed = parseCookingStepStatusPayload(dv);
+    if (!parsed) return;
+
+    applyRecipeStateFromStepStatus(zoneIdx, parsed.flags, parsed.stepIndex, parsed.remainingTime);
+
+    log(`CZ${zoneIdx + 1}: manual 2C28 read -> flags=${parsed.flags}, step=${parsed.stepIndex}, remaining=${parsed.remainingTime}`);
     renderCooktopZones();
   } catch (_) {
     // Keep existing UI values if read fails.
@@ -3143,7 +3304,11 @@ async function connectCookingZoneFlow() {
       await enableCzControlIndications();
       await enableCookingStepStatusNotifications();
       await primeAllActualConditionsOnce();
+      for (let i = 0; i < Math.max(1, czServices.length); i++) {
+        await readCookingStepStatusNow(i);
+      }
       await primeAllCzControlStatesOnce();
+      await primeAssociatedZoneRecipeTargets();
       await enableSensorNotifications();
       await primeAllInternalTemperatures();
     } catch (notifErr) {
@@ -3178,6 +3343,7 @@ function onApplianceDisconnected() {
   sensorNotifEnabled = false;
   sensorAggregateCharsByZone = [];
   sensorAggregateHandlersByZone = [];
+  czControlRefreshInFlightByZone = [];
   zoneUiState = [createDefaultZoneState()];
   uiToServiceMap = [];
   rbStepsSentToCz = false;
