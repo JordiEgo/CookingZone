@@ -345,6 +345,53 @@
       #rbSaveJsonBtn,
       #rbLoadJsonBtnLabel {
         padding: 6px 8px !important;
+
+    @media (max-width: 640px) {
+      #ftsOverlay {
+        padding: 10px !important;
+      }
+
+      #ftsModal {
+        padding: 12px !important;
+        border-radius: 10px !important;
+      }
+
+      #ftsDestNode,
+      #ftsPayloadSize,
+      #ftsPktDelay {
+        width: 100% !important;
+        font-size: 16px !important;
+      }
+
+      #ftsStartBtn,
+      #ftsAbortBtn,
+      #ftsFlashBtn,
+      #ftsReadBtn,
+      #ftsQueryBtn,
+      #ftsCloseBtn,
+      #ftsClearLogBtn {
+        min-height: 40px;
+        font-size: 13px;
+        padding: 9px 12px !important;
+      }
+
+      #ftsLogBox {
+        height: 180px !important;
+      }
+    }
+
+    @media (max-width: 420px) {
+      #ftsModal .row {
+        gap: 6px !important;
+      }
+
+      #ftsStartBtn,
+      #ftsAbortBtn,
+      #ftsFlashBtn,
+      #ftsReadBtn {
+        flex: 1 1 calc(50% - 6px);
+      }
+    }
         font-size: 11px !important;
       }
 
@@ -4524,62 +4571,20 @@ const ftsConsole = (() => {
       const done = await waitCtrl([RESP_READ_DONE], estChunks * 20 + 4000);
       const totalBytes = done.dv.getUint32(3, true);
 
-      // Some stacks deliver trailing READ_DATA notifications shortly after READ_DONE.
-      // Wait until we are complete OR the stream remains stable for a short time.
-      const graceMaxMs = Math.min(8000, Math.max(2000, estChunks * 8));
-      const graceStart = Date.now();
-      let lastRx = -1;
-      let stableSince = Date.now();
-      while ((Date.now() - graceStart) < graceMaxMs) {
-        const rxNow = state.readChunks.reduce((s, c) => s + c.length, 0);
-        if (rxNow >= totalBytes) break;
-        if (rxNow !== lastRx) {
-          lastRx = rxNow;
-          stableSince = Date.now();
-        } else if ((Date.now() - stableSince) >= 700) {
-          break;
-        }
-        await sleep(50);
-      }
-
-      const rxBytes = state.readChunks.reduce((s, c) => s + c.length, 0);
-      if (rxBytes === 0) {
-        throw new Error('No READ_DATA received');
-      }
+      // Let late READ_DATA notifications arrive before CRC verification.
+      await sleep(450);
 
       const out = new Uint8Array(totalBytes);
       let p = 0;
       for (const c of state.readChunks) {
-        if (p >= totalBytes) break;
-        const copyLen = Math.min(c.length, totalBytes - p);
-        out.set(c.subarray(0, copyLen), p);
-        p += copyLen;
+        out.set(c, p);
+        p += c.length;
       }
 
-      const outRx = new Uint8Array(rxBytes);
-      let q = 0;
-      for (const c of state.readChunks) {
-        outRx.set(c, q);
-        q += c.length;
-      }
+      const calc = crc32(out.buffer);
+      if (calc !== state.readCRC32) throw new Error('CRC mismatch');
 
-      const calcExpectedLen = crc32(out.buffer);
-      const calcRxLen = crc32(outRx.buffer);
-      const expectedHex = state.readCRC32.toString(16).toUpperCase().padStart(8, '0');
-      const calcExpectedHex = calcExpectedLen.toString(16).toUpperCase().padStart(8, '0');
-      const calcRxHex = calcRxLen.toString(16).toUpperCase().padStart(8, '0');
-
-      let finalBytes = null;
-      if (calcExpectedLen === state.readCRC32) {
-        finalBytes = out;
-      } else if (calcRxLen === state.readCRC32) {
-        finalBytes = outRx;
-        logLine(`READ_DONE size mismatch tolerated (done=${totalBytes}, rx=${rxBytes})`);
-      } else {
-        throw new Error(`CRC mismatch (expLen=0x${calcExpectedHex}, rxLen=0x${calcRxHex}, expected=0x${expectedHex}, done=${totalBytes}, rx=${rxBytes})`);
-      }
-
-      const blob = new Blob([finalBytes], { type: 'application/octet-stream' });
+      const blob = new Blob([out], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
