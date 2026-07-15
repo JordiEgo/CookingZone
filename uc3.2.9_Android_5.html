@@ -4524,18 +4524,27 @@ const ftsConsole = (() => {
       const done = await waitCtrl([RESP_READ_DONE], estChunks * 20 + 4000);
       const totalBytes = done.dv.getUint32(3, true);
 
-      // Some stacks deliver the last READ_DATA notifications slightly after READ_DONE.
-      // Give a short grace window so CRC is computed on the complete buffer.
-      const graceEnd = Date.now() + 2000;
-      while (Date.now() < graceEnd) {
-        const rxSoFar = state.readChunks.reduce((s, c) => s + c.length, 0);
-        if (rxSoFar >= totalBytes) break;
+      // Some stacks deliver trailing READ_DATA notifications shortly after READ_DONE.
+      // Wait until we are complete OR the stream remains stable for a short time.
+      const graceMaxMs = Math.min(8000, Math.max(2000, estChunks * 8));
+      const graceStart = Date.now();
+      let lastRx = -1;
+      let stableSince = Date.now();
+      while ((Date.now() - graceStart) < graceMaxMs) {
+        const rxNow = state.readChunks.reduce((s, c) => s + c.length, 0);
+        if (rxNow >= totalBytes) break;
+        if (rxNow !== lastRx) {
+          lastRx = rxNow;
+          stableSince = Date.now();
+        } else if ((Date.now() - stableSince) >= 700) {
+          break;
+        }
         await sleep(50);
       }
 
       const rxBytes = state.readChunks.reduce((s, c) => s + c.length, 0);
-      if (rxBytes < totalBytes) {
-        throw new Error(`Incomplete READ_DATA stream (${rxBytes}/${totalBytes} bytes)`);
+      if (rxBytes === 0) {
+        throw new Error('No READ_DATA received');
       }
 
       const out = new Uint8Array(totalBytes);
@@ -4546,12 +4555,31 @@ const ftsConsole = (() => {
         out.set(c.subarray(0, copyLen), p);
         p += copyLen;
       }
-      const calc = crc32(out.buffer);
-      if (calc !== state.readCRC32) {
-        throw new Error(`CRC mismatch (calc=0x${calc.toString(16).toUpperCase().padStart(8, '0')} expected=0x${state.readCRC32.toString(16).toUpperCase().padStart(8, '0')}, bytes=${totalBytes})`);
+
+      const outRx = new Uint8Array(rxBytes);
+      let q = 0;
+      for (const c of state.readChunks) {
+        outRx.set(c, q);
+        q += c.length;
       }
 
-      const blob = new Blob([out], { type: 'application/octet-stream' });
+      const calcExpectedLen = crc32(out.buffer);
+      const calcRxLen = crc32(outRx.buffer);
+      const expectedHex = state.readCRC32.toString(16).toUpperCase().padStart(8, '0');
+      const calcExpectedHex = calcExpectedLen.toString(16).toUpperCase().padStart(8, '0');
+      const calcRxHex = calcRxLen.toString(16).toUpperCase().padStart(8, '0');
+
+      let finalBytes = null;
+      if (calcExpectedLen === state.readCRC32) {
+        finalBytes = out;
+      } else if (calcRxLen === state.readCRC32) {
+        finalBytes = outRx;
+        logLine(`READ_DONE size mismatch tolerated (done=${totalBytes}, rx=${rxBytes})`);
+      } else {
+        throw new Error(`CRC mismatch (expLen=0x${calcExpectedHex}, rxLen=0x${calcRxHex}, expected=0x${expectedHex}, done=${totalBytes}, rx=${rxBytes})`);
+      }
+
+      const blob = new Blob([finalBytes], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
